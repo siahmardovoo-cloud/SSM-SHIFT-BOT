@@ -346,3 +346,254 @@ async def cb_ref(cb: CallbackQuery) -> None:
     )
     share = f"https://t.me/share/url?url={quote(link)}&text={quote('Боти шрифтҳои зебо 🔤')}"
     await show(cb, text, kb([[btn("📤 Фиристодан ба дӯст", url=share)], [BACK]]))
+
+
+# ====================== Пардохт ======================
+@router.callback_query(F.data == "pay")
+async def cb_pay(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    u = await db.get_user(cb.from_user.id)
+    now_state = f"✅ то {fmt_date(u['sub_until'])}" if is_active(u) else "❌ нест"
+    text = (
+        f"💳 <b>Пардохти обунаи моҳона</b>\n\n"
+        f"💰 Нарх: {config.PRICE_SOMONI} сомонӣ ё {config.STARS_PRICE} Stars ⭐\n"
+        f"⏳ Ҳозира: {now_state}\n\n"
+        "⭐ <b>Старс</b> — пардохт ва фаъолшавӣ дар ҳамон лаҳза.\n"
+        f"🏦 <b>{html.escape(config.CARD_BANK)}</b> — ба корт гузаронед ва чекро фиристед."
+    )
+    await show(cb, text, kb([
+        [btn(f"⭐ Старс ({config.STARS_PRICE} ⭐)", "pay_stars"), btn(f"🏦 {config.CARD_BANK}", "pay_card")],
+        [BACK],
+    ]))
+
+
+@router.callback_query(F.data == "pay_stars")
+async def cb_pay_stars(cb: CallbackQuery, bot: Bot) -> None:
+    await bot.send_invoice(
+        chat_id=cb.from_user.id,
+        title="Обунаи 1 моҳа",
+        description="Табдили худкори шрифт дар Telegram Business",
+        payload=f"sub:{config.SUB_DAYS}",
+        provider_token="",
+        currency="XTR",
+        prices=[LabeledPrice(label="Обуна", amount=config.STARS_PRICE)],
+    )
+    await cb.answer()
+
+
+@router.pre_checkout_query()
+async def pre_checkout(query: PreCheckoutQuery) -> None:
+    await query.answer(ok=True)
+
+
+@router.message(F.successful_payment)
+async def on_paid(message: Message) -> None:
+    uid = message.from_user.id
+    until = await db.extend_sub(uid, config.SUB_DAYS)
+    await db.add_payment(uid, "stars", "approved")
+    await message.answer(
+        f"✅ Пардохт қабул шуд! Обуна то <b>{fmt_date(until)}</b> фаъол аст.", reply_markup=menu_kb()
+    )
+
+
+@router.callback_query(F.data == "pay_card")
+async def cb_pay_card(cb: CallbackQuery, state: FSMContext) -> None:
+    if not config.CARD_NUMBER:
+        return await cb.answer("Пардохт бо корт ҳанӯз танзим нашудааст", show_alert=True)
+    await state.set_state(PayStates.proof)
+    holder = f"\n👤 Ном: {html.escape(config.CARD_HOLDER)}" if config.CARD_HOLDER else ""
+    text = (
+        f"🏦 <b>{html.escape(config.CARD_BANK)}</b>\n\n"
+        f"Рақам: <code>{html.escape(config.CARD_NUMBER)}</code>{holder}\n"
+        f"Маблағ: <b>{config.PRICE_SOMONI} сомонӣ</b>\n\n"
+        "Пас аз гузаронидан скриншоти чекро ҳамин ҷо фиристед 📸"
+    )
+    await show(cb, text, kb([[BACK]]))
+
+
+@router.message(PayStates.proof, F.photo)
+async def on_proof(message: Message, state: FSMContext, bot: Bot) -> None:
+    file_id = message.photo[-1].file_id
+    pid = await db.add_payment(message.from_user.id, "card", "pending", file_id)
+    await state.clear()
+    await message.answer("⏳ Чек фиристода шуд. Админ ба наздикӣ санҷида, обунаро фаъол мекунад.")
+    caption = (
+        f"💳 Пардохти нав #{pid}\n"
+        f"Корбар: {html.escape(message.from_user.full_name)} (<code>{message.from_user.id}</code>)\n"
+        f"Маблағ: {config.PRICE_SOMONI} сомонӣ"
+    )
+    markup = kb([[btn("✅ Тасдиқ", f"appr:{pid}"), btn("❌ Рад", f"rej:{pid}")]])
+    for admin_id in config.ADMIN_IDS:
+        try:
+            await bot.send_photo(admin_id, file_id, caption=caption, reply_markup=markup)
+        except Exception as e:  # noqa: BLE001
+            log.warning("admin %s: %s", admin_id, e)
+
+
+@router.message(PayStates.proof)
+async def on_proof_wrong(message: Message) -> None:
+    await message.answer("📸 Лутфан скриншоти чекро ҳамчун расм фиристед.")
+
+
+@router.callback_query(F.data.regexp(r"^(appr|rej):\d+$"))
+async def on_admin_decision(cb: CallbackQuery, bot: Bot) -> None:
+    if cb.from_user.id not in config.ADMIN_IDS:
+        return await cb.answer("Танҳо барои админ", show_alert=True)
+    action, pid_s = cb.data.split(":")
+    payment = await db.get_payment(int(pid_s))
+    if not payment or payment["status"] != "pending":
+        return await cb.answer("Ин пардохт аллакай коркард шудааст", show_alert=True)
+    uid = payment["user_id"]
+    if action == "appr":
+        until = await db.extend_sub(uid, config.SUB_DAYS)
+        await db.set_payment_status(payment["id"], "approved")
+        await bot.send_message(uid, f"✅ Пардохт тасдиқ шуд! Обуна то <b>{fmt_date(until)}</b> фаъол аст.")
+        result = "✅ Тасдиқ шуд"
+    else:
+        await db.set_payment_status(payment["id"], "rejected")
+        await bot.send_message(uid, "❌ Пардохт рад шуд. Агар хато бошад, ба дастгирӣ нависед.")
+        result = "❌ Рад шуд"
+    try:
+        await cb.message.edit_caption(caption=f"{cb.message.caption}\n\n{result}", reply_markup=None)
+    except TelegramBadRequest:
+        pass
+    await cb.answer(result)
+
+
+# ====================== Админ-фармонҳо ======================
+@router.message(Command("stats"), F.from_user.id.in_(config.ADMIN_IDS))
+async def cmd_stats(message: Message) -> None:
+    s = await db.stats()
+    await message.answer(
+        f"📊 Корбарон: {s['users']}\n✅ Обунаи фаъол: {s['active']}\n💼 Business пайваст: {s['connections']}"
+    )
+
+
+@router.message(Command("grant"), F.from_user.id.in_(config.ADMIN_IDS))
+async def cmd_grant(message: Message, command: CommandObject, bot: Bot) -> None:
+    parts = (command.args or "").split()
+    if len(parts) != 2 or not all(p.lstrip("-").isdigit() for p in parts):
+        return await message.answer("Истифода: /grant user_id days")
+    uid, days = int(parts[0]), int(parts[1])
+    if not await db.get_user(uid):
+        return await message.answer("Корбар ёфт нашуд")
+    until = await db.extend_sub(uid, days)
+    await message.answer(f"✅ Обуна то {fmt_date(until)}")
+    try:
+        await bot.send_message(uid, f"🎁 Ба шумо обуна дода шуд — то <b>{fmt_date(until)}</b>.")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# ====================== Business-режим ======================
+@router.business_connection()
+async def on_business_connection(connection: BusinessConnection, bot: Bot) -> None:
+    await db.save_connection(connection.id, connection.user.id, connection.is_enabled)
+    text = (
+        "✅ Бот ба Telegram Business пайваст шуд!"
+        if connection.is_enabled
+        else "ℹ️ Бот аз Telegram Business ҷудо шуд."
+    )
+    try:
+        await bot.send_message(connection.user_chat_id, text)
+    except Exception as e:  # noqa: BLE001
+        log.warning("business notify failed: %s", e)
+
+
+@router.business_message(F.text)
+async def on_business_message(message: Message, bot: Bot) -> None:
+    conn_id = message.business_connection_id
+    conn = await db.get_connection(conn_id)
+    if conn is None:
+        try:
+            c = await bot.get_business_connection(conn_id)
+        except Exception as e:  # noqa: BLE001
+            log.warning("get_business_connection failed: %s", e)
+            return
+        await db.save_connection(c.id, c.user.id, c.is_enabled)
+        owner_id = c.user.id
+    else:
+        owner_id = conn["user_id"]
+
+    # Танҳо паёмҳои худи соҳиби аккаунт иваз мешаванд
+    if not message.from_user or message.from_user.id != owner_id:
+        return
+
+    user = await db.get_user(owner_id)
+    if not user or not user["font"] or not user["auto"] or not is_active(user):
+        return
+
+    text = message.text
+    if text.startswith("/"):
+        return
+    if any(e.type in SKIP_ENTITIES for e in (message.entities or [])):
+        return
+
+    new_text = fonts.apply_font(user["font"], text)
+    if new_text == text:
+        return
+    try:
+        await bot.edit_message_text(
+            text=new_text,
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+            business_connection_id=conn_id,
+            parse_mode=None,
+        )
+    except TelegramBadRequest as e:
+        log.warning("business edit failed: %s", e)
+
+
+# ====================== Inline-режим ======================
+@router.inline_query()
+async def on_inline(query: InlineQuery) -> None:
+    text = query.query.strip()
+    if not text:
+        hint = InlineQueryResultArticle(
+            id="hint",
+            title="Матн нависед",
+            description=f"@{config.BOT_USERNAME} Салом дунё",
+            input_message_content=InputTextMessageContent(message_text=f"@{config.BOT_USERNAME}"),
+        )
+        return await query.answer([hint], cache_time=1, is_personal=True)
+    results = []
+    for fid, name, _ in fonts.FONTS:
+        styled = fonts.apply_font(fid, text)
+        results.append(
+            InlineQueryResultArticle(
+                id=str(fid),
+                title=f"{fid} · {name}",
+                description=styled[:80],
+                input_message_content=InputTextMessageContent(message_text=styled, parse_mode=None),
+            )
+        )
+    await query.answer(results, cache_time=1, is_personal=True)
+
+
+# ====================== Табдил дар худи бот ======================
+@router.message(F.text, F.chat.type == "private", StateFilter(None))
+async def convert_private(message: Message) -> None:
+    if message.text.startswith("/"):
+        return
+    user = await db.get_user(message.from_user.id)
+    if not user or not user["font"]:
+        return await message.answer("Аввал шрифтро интихоб кунед: /start → «🔤 Шрифтҳо»")
+    await message.answer(fonts.apply_font(user["font"], message.text), parse_mode=None)
+
+
+# ====================== Оғоз ======================
+async def main() -> None:
+    await db.init()
+    bot = Bot(token=config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    me = await bot.get_me()
+    config.BOT_USERNAME = me.username
+    log.info("Started as @%s", me.username)
+
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(router)
+    await bot.delete_webhook(drop_pending_updates=False)
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
