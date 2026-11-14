@@ -27,7 +27,6 @@ from aiogram.types import (
     Message,
     PreCheckoutQuery,
 )
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import config
 import db
@@ -44,23 +43,36 @@ SKIP_ENTITIES = {
     "bot_command", "custom_emoji", "code", "pre",
 }
 
+# Оё версияи aiogram рангҳои тугмаро (style) дастгирӣ мекунад?
+# Агар не — тугмаҳо бе ранг кор мекунанд, бот намеафтад.
+HAS_STYLE = "style" in InlineKeyboardButton.model_fields
+if not HAS_STYLE:
+    log.warning("aiogram кӯҳна аст: рангҳои тугма хомӯшанд. Барои ранг: pip install -U aiogram")
+
 
 class PayStates(StatesGroup):
     proof = State()
 
 
 # ====================== Ёрдамчиҳо ======================
-def btn(text: str, data: str | None = None, url: str | None = None) -> InlineKeyboardButton:
+def btn(
+    text: str,
+    data: str | None = None,
+    url: str | None = None,
+    style: str | None = None,
+) -> InlineKeyboardButton:
+    """style: 'primary' (кабуд), 'success' (сабз), 'danger' (сурх)."""
+    extra = {"style": style} if (style and HAS_STYLE) else {}
     if url:
-        return InlineKeyboardButton(text=text, url=url)
-    return InlineKeyboardButton(text=text, callback_data=data)
+        return InlineKeyboardButton(text=text, url=url, **extra)
+    return InlineKeyboardButton(text=text, callback_data=data, **extra)
 
 
 def kb(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-BACK = btn("⬅️ Баргаштан", "menu")
+BACK = btn("⬅️ Баргаштан", "menu", style="danger")
 
 
 def fmt_date(ts: int) -> str:
@@ -73,20 +85,20 @@ def is_active(user) -> bool:
 
 def menu_kb() -> InlineKeyboardMarkup:
     support = (
-        btn("📞 Дастгирӣ", url=f"https://t.me/{config.SUPPORT_USERNAME.lstrip('@')}")
+        btn("📞 Дастгирӣ", url=f"https://t.me/{config.SUPPORT_USERNAME.lstrip('@')}", style="success")
         if config.SUPPORT_USERNAME
-        else btn("📞 Дастгирӣ", "no_support")
+        else btn("📞 Дастгирӣ", "no_support", style="success")
     )
     lessons = (
-        btn("🎓 Дарсҳо", url=config.LESSONS_URL)
+        btn("🎓 Дарсҳо", url=config.LESSONS_URL, style="danger")
         if config.LESSONS_URL
-        else btn("🎓 Дарсҳо", "no_lessons")
+        else btn("🎓 Дарсҳо", "no_lessons", style="danger")
     )
     return kb([
-        [btn("🔤 Шрифтҳо", "fonts"), btn("⚙️ Танзимот", "settings")],
-        [btn("👤 Кабинет", "cabinet"), btn("📋 Маълумот", "info")],
-        [btn("💳 Пардохт", "pay"), btn("👥 Реферал", "ref")],
-        [btn("🔌 Пайваст кардан", "connect"), support],
+        [btn("🔤 Шрифтҳо", "fonts", style="primary"), btn("⚙️ Танзимот", "settings", style="primary")],
+        [btn("👤 Кабинет", "cabinet", style="primary"), btn("📋 Маълумот", "info", style="primary")],
+        [btn("💳 Пардохт", "pay", style="success"), btn("👥 Реферал", "ref", style="success")],
+        [btn("🔌 Пайваст кардан", "connect", style="success"), support],
         [lessons],
     ])
 
@@ -131,8 +143,8 @@ async def missing_sponsors(bot: Bot, user_id: int) -> list[str]:
 
 
 def sponsor_kb(missing: list[str]) -> InlineKeyboardMarkup:
-    rows = [[btn(f"📢 {ch}", url=f"https://t.me/{ch.lstrip('@')}")] for ch in missing]
-    rows.append([btn("✅ Санҷиш", "check_sub")])
+    rows = [[btn(f"📢 {ch}", url=f"https://t.me/{ch.lstrip('@')}", style="primary")] for ch in missing]
+    rows.append([btn("✅ Санҷиш", "check_sub", style="success")])
     return kb(rows)
 
 
@@ -241,13 +253,28 @@ def fonts_text(current: int) -> str:
 
 
 def fonts_kb(current: int) -> InlineKeyboardMarkup:
-    b = InlineKeyboardBuilder()
-    for fid, _, _ in fonts.FONTS:
-        b.button(text=f"✅ {fid}" if fid == current else str(fid), callback_data=f"font:{fid}")
-    b.adjust(4, 4, 4, 3)
-    b.row(btn("🚫 Хомӯш кардан", "font:0"))
-    b.row(BACK)
-    return b.as_markup()
+    ids = [f[0] for f in fonts.FONTS]
+    buttons = [
+        btn(
+            f"✅ {fid}" if fid == current else str(fid),
+            f"font:{fid}",
+            style="success" if fid == current else "primary",
+        )
+        for fid in ids
+    ]
+    rows: list[list[InlineKeyboardButton]] = []
+    i = 0
+    for size in (4, 4, 4, 3):
+        chunk = buttons[i:i + size]
+        if chunk:
+            rows.append(chunk)
+        i += size
+    if i < len(buttons):  # агар шрифти иловагӣ илова шавад
+        for j in range(i, len(buttons), 4):
+            rows.append(buttons[j:j + 4])
+    rows.append([btn("🚫 Хомӯш кардан", "font:0", style="danger")])
+    rows.append([BACK])
+    return kb(rows)
 
 
 @router.callback_query(F.data == "fonts")
@@ -271,20 +298,23 @@ async def cb_settings(cb: CallbackQuery) -> None:
     user = await db.get_user(cb.from_user.id)
     # Танзимот танҳо барои обунахандагон (админ бе обуна ҳам мегузарад)
     if cb.from_user.id not in config.ADMIN_IDS and not is_active(user):
-        return await cb.answer(
-            "🔒 Танзимот барои обунахандагон аст. Аввал обуна харед.", show_alert=True
+        text = (
+            "🔒 <b>Танзимот барои обунахандагон аст</b>\n\n"
+            "Аввал обуна харед — баъд табдили худкор дар Telegram Business "
+            "ва дигар имкониятҳо кушода мешаванд."
         )
+        return await show(cb, text, kb([[btn("💳 Пардохт", "pay", style="success")], [BACK]]))
     if cb.data == "toggle_auto":
         await db.toggle_auto(cb.from_user.id)
         user = await db.get_user(cb.from_user.id)
     text = (
         "⚙️ <b>Танзимот</b>\n\n"
-        f"🔄 Табдili худкор дар Business: {'✅ фаъол' if user['auto'] else '❌ хомӯш'}\n"
+        f"🔄 Табдили худкор дар Business: {'✅ фаъол' if user['auto'] else '❌ хомӯш'}\n"
         f"🔤 Шрифти ҳозира: <b>{fonts.font_name(user['font'])}</b>"
     )
     markup = kb([
-        [btn("🔄 Фаъол / хомӯш кардан", "toggle_auto")],
-        [btn("🔤 Шрифтҳо", "fonts")],
+        [btn("🔄 Фаъол / хомӯш кардан", "toggle_auto", style="success")],
+        [btn("🔤 Шрифтҳо", "fonts", style="primary")],
         [BACK],
     ])
     await show(cb, text, markup)
@@ -306,7 +336,10 @@ async def cb_cabinet(cb: CallbackQuery) -> None:
         f"💼 Business: {business}\n"
         f"👥 Рефералҳо: {u['invited']} | ⭐ Холҳо: {u['points']}/{config.REF_TARGET}"
     )
-    await show(cb, text, kb([[btn("💳 Пардохт", "pay"), btn("⚙️ Танзимот", "settings")], [BACK]]))
+    await show(cb, text, kb([
+        [btn("💳 Пардохт", "pay", style="success"), btn("⚙️ Танзимот", "settings", style="primary")],
+        [BACK],
+    ]))
 
 
 @router.callback_query(F.data == "info")
@@ -334,7 +367,7 @@ async def cb_connect(cb: CallbackQuery) -> None:
         "5. Обунаро фаъол кунед (💳 Пардохт) — ва паёмҳо худкор иваз мешаванд ✅\n\n"
         "ℹ️ Паёмҳои дорои линк, @ва кодро бот дастнорас мегузорад."
     )
-    await show(cb, text, kb([[btn("💳 Пардохт", "pay")], [BACK]]))
+    await show(cb, text, kb([[btn("💳 Пардохт", "pay", style="success")], [BACK]]))
 
 
 # ====================== Реферал ======================
@@ -353,7 +386,7 @@ async def cb_ref(cb: CallbackQuery) -> None:
         f"⭐ Холҳо: {u['points']} / {config.REF_TARGET}"
     )
     share = f"https://t.me/share/url?url={quote(link)}&text={quote('Боти шрифтҳои зебо 🔤')}"
-    await show(cb, text, kb([[btn("📤 Фиристодан ба дӯст", url=share)], [BACK]]))
+    await show(cb, text, kb([[btn("📤 Фиристодан ба дӯст", url=share, style="primary")], [BACK]]))
 
 
 # ====================== Пардохт ======================
@@ -370,7 +403,10 @@ async def cb_pay(cb: CallbackQuery, state: FSMContext) -> None:
         f"🏦 <b>{html.escape(config.CARD_BANK)}</b> — ба корт гузаронед ва чекро фиристед."
     )
     await show(cb, text, kb([
-        [btn(f"⭐ Старс ({config.STARS_PRICE} ⭐)", "pay_stars"), btn(f"🏦 {config.CARD_BANK}", "pay_card")],
+        [
+            btn(f"⭐ Старс ({config.STARS_PRICE} ⭐)", "pay_stars", style="success"),
+            btn(f"🏦 {config.CARD_BANK}", "pay_card", style="success"),
+        ],
         [BACK],
     ]))
 
@@ -430,7 +466,10 @@ async def on_proof(message: Message, state: FSMContext, bot: Bot) -> None:
         f"Корбар: {html.escape(message.from_user.full_name)} (<code>{message.from_user.id}</code>)\n"
         f"Маблағ: {config.PRICE_SOMONI} сомонӣ"
     )
-    markup = kb([[btn("✅ Тасдиқ", f"appr:{pid}"), btn("❌ Рад", f"rej:{pid}")]])
+    markup = kb([[
+        btn("✅ Тасдиқ", f"appr:{pid}", style="success"),
+        btn("❌ Рад", f"rej:{pid}", style="danger"),
+    ]])
     for admin_id in config.ADMIN_IDS:
         try:
             await bot.send_photo(admin_id, file_id, caption=caption, reply_markup=markup)
