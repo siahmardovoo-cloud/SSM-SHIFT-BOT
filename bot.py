@@ -1,12 +1,14 @@
 import asyncio
 import html
 import logging
+import socket
 import time
 from datetime import datetime
 from urllib.parse import quote
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart, StateFilter
@@ -271,7 +273,7 @@ async def cb_settings(cb: CallbackQuery) -> None:
     user = await db.get_user(cb.from_user.id)
     text = (
         "⚙️ <b>Танзимот</b>\n\n"
-        f"🔄 Табдили худкор дар Business: {'✅ фаъол' if user['auto'] else '❌ хомӯш'}\n"
+        f"🔄 Табдili худкор дар Business: {'✅ фаъол' if user['auto'] else '❌ хомӯш'}\n"
         f"🔤 Шрифти ҳозира: <b>{fonts.font_name(user['font'])}</b>"
     )
     markup = kb([
@@ -582,17 +584,52 @@ async def convert_private(message: Message) -> None:
 
 
 # ====================== Оғоз ======================
+def make_session() -> AiohttpSession:
+    """Сессия бо IPv4 ва пайвастагии нав барои ҳар дархост (ҳал барои Request timeout дар Railway)."""
+    session = AiohttpSession(timeout=60)
+    try:
+        session._connector_init["family"] = socket.AF_INET
+        session._connector_init["force_close"] = True
+    except Exception as e:  # noqa: BLE001
+        log.warning("session tune failed: %s", e)
+    return session
+
+
 async def main() -> None:
     await db.init()
-    bot = Bot(token=config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    me = await bot.get_me()
+    bot = Bot(
+        token=config.BOT_TOKEN,
+        session=make_session(),
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+
+    # Агар Telegram дар оғоз ҷавоб надиҳад, бот намеафтад, балки такрор мекунад
+    while True:
+        try:
+            me = await bot.get_me()
+            break
+        except Exception as e:  # noqa: BLE001
+            log.warning("get_me failed, retry in 5s: %s", e)
+            await asyncio.sleep(5)
+
     config.BOT_USERNAME = me.username
     log.info("Started as @%s", me.username)
 
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
-    await bot.delete_webhook(drop_pending_updates=False)
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+
+    while True:
+        try:
+            await bot.delete_webhook(drop_pending_updates=False)
+            await dp.start_polling(
+                bot,
+                allowed_updates=dp.resolve_used_update_types(),
+                polling_timeout=20,
+            )
+            break
+        except Exception as e:  # noqa: BLE001
+            log.warning("polling crashed, restart in 5s: %s", e)
+            await asyncio.sleep(5)
 
 
 if __name__ == "__main__":
