@@ -70,9 +70,12 @@ assert len(_SC_SRC) == 26
 SMALL_CAPS = dict(zip(LOW, _SC_SRC))
 
 # --- Услубҳои кириллик ---
-_STYLISH_LOWER = {"а": "ɑ", "е": "є", "э": "є", "о": "ө", "у": "ү", "и": "і"}
+# Шрифти 1 (Stylish): а -> ɑ, л -> ʌ, е -> є, рақамҳо ғафс (bold)
+_STYLISH_LOWER = {"а": "ɑ", "л": "ʌ", "е": "є", "э": "є", "и": "і"}
 STYLISH = dict(_STYLISH_LOWER)
 STYLISH.update({k.upper(): v.upper() for k, v in _STYLISH_LOWER.items()})
+for _i, _d in enumerate(DIG):
+    STYLISH[_d] = chr(0x1D7CE + _i)
 
 _COPTIC_CODES = {
     "а": 0x2C81, "б": 0x2C83, "в": 0x2C83, "г": 0x2C85, "ғ": 0x2C85, "д": 0x2C87,
