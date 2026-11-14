@@ -268,9 +268,15 @@ async def cb_font_pick(cb: CallbackQuery) -> None:
 # ====================== Танзимот / Кабинет / Маълумот ======================
 @router.callback_query(F.data.in_({"settings", "toggle_auto"}))
 async def cb_settings(cb: CallbackQuery) -> None:
+    user = await db.get_user(cb.from_user.id)
+    # Танзимот танҳо барои обунахандагон (админ бе обуна ҳам мегузарад)
+    if cb.from_user.id not in config.ADMIN_IDS and not is_active(user):
+        return await cb.answer(
+            "🔒 Танзимот барои обунахандагон аст. Аввал обуна харед.", show_alert=True
+        )
     if cb.data == "toggle_auto":
         await db.toggle_auto(cb.from_user.id)
-    user = await db.get_user(cb.from_user.id)
+        user = await db.get_user(cb.from_user.id)
     text = (
         "⚙️ <b>Танзимот</b>\n\n"
         f"🔄 Табдili худкор дар Business: {'✅ фаъол' if user['auto'] else '❌ хомӯш'}\n"
