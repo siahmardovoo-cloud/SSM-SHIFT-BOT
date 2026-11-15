@@ -34,6 +34,7 @@ from aiogram.types import (
 )
 
 import admintools
+import botlang
 import config
 import db
 import extras
@@ -44,17 +45,20 @@ log = logging.getLogger("fontbot")
 
 router = Router()
 
-# Entity-ҳое, ки бо иваз кардани шрифт вайрон мешаванд — чунин паёмҳоро дастнорас мегузорем
 SKIP_ENTITIES = {
     "url", "text_link", "mention", "text_mention", "email", "phone_number",
     "bot_command", "custom_emoji", "code", "pre",
 }
 
-# Оё версияи aiogram рангҳои тугмаро (style) дастгирӣ мекунад?
-# Агар не — тугмаҳо бе ранг кор мекунанд, бот намеафтад.
 HAS_STYLE = "style" in InlineKeyboardButton.model_fields
 if not HAS_STYLE:
     log.warning("aiogram кӯҳна аст: рангҳои тугма хомӯшанд. Барои ранг: pip install -U aiogram")
+
+# ----- Т-Банк -----
+TBANK_NAME = getattr(config, "TBANK_NAME", "Т-Банк")
+TBANK_NUMBER = getattr(config, "TBANK_NUMBER", "9990000698")
+TBANK_HOLDER = getattr(config, "TBANK_HOLDER", "Саъдулло С.")
+TBANK_PRICE_RUB = getattr(config, "TBANK_PRICE_RUB", None)
 
 
 class PayStates(StatesGroup):
@@ -74,7 +78,6 @@ def btn(
     url: str | None = None,
     style: str | None = None,
 ) -> InlineKeyboardButton:
-    """style: 'primary' (кабуд), 'success' (сабз), 'danger' (сурх)."""
     extra = {"style": style} if (style and HAS_STYLE) else {}
     if url:
         return InlineKeyboardButton(text=text, url=url, **extra)
@@ -97,27 +100,33 @@ def is_active(user) -> bool:
 
 
 def menu_kb(uid: int | None = None) -> InlineKeyboardMarkup:
+    p = lambda tg, ru: botlang.pick(uid, tg, ru)  # noqa: E731
     support = (
-        btn("📞 Дастгирӣ", url=f"https://t.me/{config.SUPPORT_USERNAME.lstrip('@')}", style="success")
+        btn(p("📞 Дастгирӣ", "📞 Поддержка"), url=f"https://t.me/{config.SUPPORT_USERNAME.lstrip('@')}", style="success")
         if config.SUPPORT_USERNAME
-        else btn("📞 Дастгирӣ", "no_support", style="success")
+        else btn(p("📞 Дастгирӣ", "📞 Поддержка"), "no_support", style="success")
     )
     lessons = (
-        btn("🎓 Дарсҳо", url=config.LESSONS_URL, style="danger")
+        btn(p("🎓 Дарсҳо", "🎓 Уроки"), url=config.LESSONS_URL, style="danger")
         if config.LESSONS_URL
-        else btn("🎓 Дарсҳо", "no_lessons", style="danger")
+        else btn(p("🎓 Дарсҳо", "🎓 Уроки"), "no_lessons", style="danger")
     )
+    admin_btn = btn(p("🛠 Панели Админ", "🛠 Панель Админа"), "adm", style="danger")
     return kb([
-        [btn("🔤 Шрифтҳо", "fonts", style="primary"), btn("⚙️ Танзимот", "settings", style="primary")],
-        [btn("👤 Кабинет", "cabinet", style="primary"), btn("📋 Маълумот", "info", style="primary")],
-        [btn("💳 Пардохт", "pay", style="success"), btn("👥 Реферал", "ref", style="success")],
-        [btn("🔌 Пайваст кардан", "connect", style="success"), support],
-        [lessons, btn("🛠 Панели Админ", "adm", style="danger")] if (uid in config.ADMIN_IDS) else [lessons],
+        [btn(p("🔤 Шрифтҳо", "🔤 Шрифты"), "fonts", style="primary"),
+         btn(p("⚙️ Танзимот", "⚙️ Настройки"), "settings", style="primary")],
+        [btn(p("👤 Кабинет", "👤 Кабинет"), "cabinet", style="primary"),
+         btn(p("📋 Маълумот", "📋 Информация"), "info", style="primary")],
+        [btn(p("💳 Пардохт", "💳 Оплата"), "pay", style="success"),
+         btn(p("👥 Реферал", "👥 Реферал"), "ref", style="success")],
+        [btn(p("🔌 Пайваст кардан", "🔌 Подключить"), "connect", style="success"), support],
+        [lessons, admin_btn] if (uid in config.ADMIN_IDS) else [lessons],
     ])
 
 
 async def show(event: Message | CallbackQuery, text: str, markup: InlineKeyboardMarkup) -> None:
-    """Паёми мавҷударо иваз мекунад (барои callback) ё паёми нав мефиристад."""
+    uid = event.from_user.id if event.from_user else None
+    markup = botlang.localize(markup, uid)
     if isinstance(event, CallbackQuery):
         msg = event.message
         try:
@@ -150,7 +159,7 @@ async def missing_sponsors(bot: Bot, user_id: int) -> list[str]:
             member = await bot.get_chat_member(ch, user_id)
             if member.status in ("left", "kicked"):
                 missing.append(ch)
-        except Exception as e:  # noqa: BLE001  (бот дар канал админ нест ва ғ.)
+        except Exception as e:  # noqa: BLE001
             log.warning("sponsor check %s failed: %s", ch, e)
     return missing
 
@@ -162,6 +171,7 @@ def sponsor_kb(missing: list[str]) -> InlineKeyboardMarkup:
 
 
 SPONSOR_TEXT = "📢 Барои истифода аз бот аввал ба каналҳои зерин обуна шавед, баъд «✅ Санҷиш»-ро пахш кунед."
+SPONSOR_TEXT_RU = "📢 Чтобы пользоваться ботом, сначала подпишитесь на каналы ниже, затем нажмите «✅ Проверить»."
 
 
 class Gate(BaseMiddleware):
@@ -188,12 +198,18 @@ class Gate(BaseMiddleware):
         if config.SPONSOR_CHANNELS and user.id not in config.ADMIN_IDS:
             missing = await missing_sponsors(bot, user.id)
             if missing:
+                sp_text = botlang.pick(user.id, SPONSOR_TEXT, SPONSOR_TEXT_RU)
                 if isinstance(event, CallbackQuery):
-                    await event.answer("Ҳанӯз ба ҳама каналҳо обуна нашудаед", show_alert=True)
+                    await event.answer(
+                        botlang.pick(user.id, "Ҳанӯз ба ҳама каналҳо обуна нашудаед", "Вы ещё не подписались на все каналы"),
+                        show_alert=True,
+                    )
                     if event.data != "check_sub":
-                        await event.message.answer(SPONSOR_TEXT, reply_markup=sponsor_kb(missing))
+                        await event.message.answer(
+                            sp_text, reply_markup=botlang.localize(sponsor_kb(missing), user.id)
+                        )
                 else:
-                    await event.answer(SPONSOR_TEXT, reply_markup=sponsor_kb(missing))
+                    await event.answer(sp_text, reply_markup=botlang.localize(sponsor_kb(missing), user.id))
                 return
 
         result = await db.credit_referral(user.id)
@@ -220,7 +236,14 @@ router.callback_query.outer_middleware(Gate())
 
 
 # ====================== Меню ======================
-def welcome_text(name: str) -> str:
+def welcome_text(name: str, uid: int | None = None) -> str:
+    if botlang.get(uid) == "ru":
+        return (
+            f"👋 Добро пожаловать, <b>{html.escape(name)}</b>!\n\n"
+            "Этот бот превращает ваш текст в красивые шрифты — прямо в боте, "
+            "везде через режим inline и в ваших чатах через Telegram Business.\n\n"
+            "✨ Выберите в меню ниже:"
+        )
     return (
         f"👋 Хуш омадед, <b>{html.escape(name)}</b>!\n\n"
         "Ин бот матни шуморо ба шрифтҳои зебо табдил медиҳад — "
@@ -232,36 +255,69 @@ def welcome_text(name: str) -> str:
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
-    text = welcome_text(message.from_user.full_name)
+    uid = message.from_user.id
+    text = welcome_text(message.from_user.full_name, uid)
     if config.WELCOME_VIDEO:
         try:
-            await message.answer_video(config.WELCOME_VIDEO, caption=text, reply_markup=menu_kb(message.from_user.id))
+            await message.answer_video(config.WELCOME_VIDEO, caption=text, reply_markup=menu_kb(uid))
             return
         except Exception as e:  # noqa: BLE001
             log.warning("welcome video failed: %s", e)
-    await message.answer(text, reply_markup=menu_kb(message.from_user.id))
+    await message.answer(text, reply_markup=menu_kb(uid))
 
 
 @router.callback_query(F.data.in_({"menu", "check_sub"}))
 async def cb_menu(cb: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    await show(cb, welcome_text(cb.from_user.full_name), menu_kb(cb.from_user.id))
+    await show(cb, welcome_text(cb.from_user.full_name, cb.from_user.id), menu_kb(cb.from_user.id))
 
 
 @router.callback_query(F.data.in_({"no_support", "no_lessons"}))
 async def cb_not_set(cb: CallbackQuery) -> None:
-    await cb.answer("Ин бахш ҳанӯз танзим нашудааст", show_alert=True)
+    await cb.answer(
+        botlang.pick(cb.from_user.id, "Ин бахш ҳанӯз танзим нашудааст", "Этот раздел ещё не настроен"),
+        show_alert=True,
+    )
+
+
+# ====================== Забон / Язык ======================
+def lang_kb(uid: int) -> InlineKeyboardMarkup:
+    cur = botlang.get(uid)
+    return kb([
+        [
+            btn(("✅ " if cur == "tg" else "") + "🇹🇯 Тоҷикӣ", "lang:tg", style="success" if cur == "tg" else "primary"),
+            btn(("✅ " if cur == "ru" else "") + "🇷🇺 Русский", "lang:ru", style="success" if cur == "ru" else "primary"),
+        ],
+        [BACK],
+    ])
+
+
+LANG_TEXT = "🌐 <b>Забон / Язык</b>\n\nЗабони ботро интихоб кунед.\nВыберите язык бота."
+
+
+@router.callback_query(F.data == "lang")
+async def cb_lang(cb: CallbackQuery) -> None:
+    await show(cb, LANG_TEXT, lang_kb(cb.from_user.id))
+
+
+@router.callback_query(F.data.regexp(r"^lang:(tg|ru)$"))
+async def cb_lang_pick(cb: CallbackQuery) -> None:
+    code = cb.data.split(":")[1]
+    await botlang.set_lang(cb.from_user.id, code)
+    await cb.answer("✅ Тоҷикӣ" if code == "tg" else "✅ Русский")
+    await show(cb, LANG_TEXT, lang_kb(cb.from_user.id))
 
 
 # ====================== Шрифтҳо ======================
-def fonts_text(current: int) -> str:
-    lines = ["🔤 <b>Интихоби шрифт</b>\n"]
+def fonts_text(current: int, uid: int | None = None) -> str:
+    p = lambda tg, ru: botlang.pick(uid, tg, ru)  # noqa: E731
+    lines = [p("🔤 <b>Интихоби шрифт</b>\n", "🔤 <b>Выбор шрифта</b>\n")]
     for fid, name, _ in fonts.FONTS:
         sample = html.escape(fonts.apply_font(fid, fonts.SAMPLE))
         mark = "✅ " if fid == current else ""
         lines.append(f"{mark}{fid} · {name}: {sample}")
-    lines.append(f"\nШрифти ҳозира: <b>{fonts.font_name(current)}</b>")
-    lines.append(f"💡 Дар ҳама ҷо: @{config.BOT_USERNAME} матн")
+    lines.append(p("\nШрифти ҳозира: ", "\nТекущий шрифт: ") + f"<b>{fonts.font_name(current)}</b>")
+    lines.append(p(f"💡 Дар ҳама ҷо: @{config.BOT_USERNAME} матн", f"💡 Везде: @{config.BOT_USERNAME} текст"))
     return "\n".join(lines)
 
 
@@ -282,7 +338,7 @@ def fonts_kb(current: int) -> InlineKeyboardMarkup:
         if chunk:
             rows.append(chunk)
         i += size
-    if i < len(buttons):  # агар шрифти иловагӣ илова шавад
+    if i < len(buttons):
         for j in range(i, len(buttons), 4):
             rows.append(buttons[j:j + 4])
     rows.append([btn("🚫 Хомӯш кардан", "font:0", style="danger")])
@@ -293,7 +349,7 @@ def fonts_kb(current: int) -> InlineKeyboardMarkup:
 @router.callback_query(F.data == "fonts")
 async def cb_fonts(cb: CallbackQuery) -> None:
     user = await db.get_user(cb.from_user.id)
-    await show(cb, fonts_text(user["font"]), fonts_kb(user["font"]))
+    await show(cb, fonts_text(user["font"], cb.from_user.id), fonts_kb(user["font"]))
 
 
 @router.callback_query(F.data.startswith("font:"))
@@ -302,7 +358,7 @@ async def cb_font_pick(cb: CallbackQuery) -> None:
     if fid != 0 and fid not in {f[0] for f in fonts.FONTS}:
         return await cb.answer()
     await db.set_font(cb.from_user.id, fid)
-    await show(cb, fonts_text(fid), fonts_kb(fid))
+    await show(cb, fonts_text(fid, cb.from_user.id), fonts_kb(fid))
 
 
 # ====================== Танзимот / Кабинет / Маълумот ======================
@@ -311,16 +367,24 @@ def has_access(user_id: int, user) -> bool:
 
 
 async def locked_page(cb: CallbackQuery) -> bool:
-    """Агар обуна нест — саҳифаи қулфро нишон медиҳад ва True бармегардонад."""
     user = await db.get_user(cb.from_user.id)
     if has_access(cb.from_user.id, user):
         return False
-    text = (
+    uid = cb.from_user.id
+    text = botlang.pick(
+        uid,
         "🔒 <b>Ин бахш барои обунахандагон аст</b>\n\n"
         "Аввал обуна харед — баъд табдили худкор дар Telegram Business, "
-        "авточавоб ва дигар имкониятҳо кушода мешаванд."
+        "авточавоб ва дигар имкониятҳо кушода мешаванд.",
+        "🔒 <b>Этот раздел для подписчиков</b>\n\n"
+        "Сначала оформите подписку — после этого откроются автозамена в Telegram Business, "
+        "автоответчик и другие возможности.",
     )
-    await show(cb, text, kb([[btn("💳 Пардохт", "pay", style="success")], [BACK]]))
+    await show(cb, text, kb([
+        [btn("💳 Пардохт", "pay", style="success")],
+        [btn(botlang.pick(uid, "🌐 Забон / Язык", "🌐 Язык / Забон"), "lang", style="primary")],
+        [BACK],
+    ]))
     return True
 
 
@@ -335,6 +399,7 @@ async def cb_settings(cb: CallbackQuery) -> None:
     if await locked_page(cb):
         return
     uid = cb.from_user.id
+    p = lambda tg, ru: botlang.pick(uid, tg, ru)  # noqa: E731
     flips = {
         "toggle_typing": "typing",
         "toggle_del": "notify_del",
@@ -349,30 +414,52 @@ async def cb_settings(cb: CallbackQuery) -> None:
         await extras.save(uid, **{key: 0 if ex[key] else 1})
     user = await db.get_user(uid)
     ex = await extras.get(uid)
-    ar_state = "🟢 фаъол" if (ex["ar_on"] and (ex["ar_text"] or ex["away_text"])) else "🔴 хомӯш"
-    text = (
-        "⚙️ <b>Танзимот</b>\n\n"
-        f"🔄 Табдили худкор дар Business: {'✅ фаъол' if user['auto'] else '❌ хомӯш'}\n"
-        f"⌨️ Навишти оҳиста: {'✅ фаъол' if ex['typing'] else '❌ хомӯш'}\n"
-        f"🗑 Удалит (паёми нестшуда): {'✅ фаъол' if ex['notify_del'] else '❌ хомӯш'}\n"
-        f"✏️ Таҳрир (паёми таҳриршуда): {'✅ фаъол' if ex['notify_edit'] else '❌ хомӯш'}\n"
-        f"👥 Шрифт дар гурӯҳҳо: {'✅ фаъол' if ex['groups'] else '❌ хомӯш'}\n"
-        f"🤖 Авточавоб: {ar_state}\n"
-        f"🔤 Шрифти ҳозира: <b>{fonts.font_name(user['font'])}</b>\n\n"
-        "ℹ️ <i>Удалит/Таҳрир: вақте шахси дигар дар чатҳои Business паёмро нест ё таҳрир кунад, "
-        "бот матни онро ба шумо мефиристад (танҳо аз лаҳзаи фаъол кардан).\n"
-        "Дар гурӯҳ: /f матн — бот матнро бо шрифти шумо мефиристад.</i>"
-    )
+    ON = p("✅ фаъол", "✅ включено")
+    OFF = p("❌ хомӯш", "❌ выключено")
+    ar_state = p("🟢 фаъол", "🟢 включён") if (ex["ar_on"] and (ex["ar_text"] or ex["away_text"])) else p("🔴 хомӯш", "🔴 выключен")
+    lang_name = "🇷🇺 Русский" if botlang.get(uid) == "ru" else "🇹🇯 Тоҷикӣ"
+    if botlang.get(uid) == "ru":
+        text = (
+            "⚙️ <b>Настройки</b>\n\n"
+            f"🔄 Автозамена в Business: {ON if user['auto'] else OFF}\n"
+            f"⌨️ Медленный набор: {ON if ex['typing'] else OFF}\n"
+            f"🗑 Удалит (удалённые сообщения): {ON if ex['notify_del'] else OFF}\n"
+            f"✏️ Правка (изменённые сообщения): {ON if ex['notify_edit'] else OFF}\n"
+            f"👥 Шрифт в группах: {ON if ex['groups'] else OFF}\n"
+            f"🤖 Автоответчик: {ar_state}\n"
+            f"🔤 Текущий шрифт: <b>{fonts.font_name(user['font'])}</b>\n"
+            f"🌐 Язык: <b>{lang_name}</b>\n\n"
+            "ℹ️ <i>Удалит/Правка: когда другой человек удалит или изменит сообщение в чатах Business, "
+            "бот пришлёт вам его текст (только с момента включения).\n"
+            "В группе: /f текст — бот отправит текст вашим шрифтом.</i>"
+        )
+    else:
+        text = (
+            "⚙️ <b>Танзимот</b>\n\n"
+            f"🔄 Табдили худкор дар Business: {ON if user['auto'] else OFF}\n"
+            f"⌨️ Навишти оҳиста: {ON if ex['typing'] else OFF}\n"
+            f"🗑 Удалит (паёми нестшуда): {ON if ex['notify_del'] else OFF}\n"
+            f"✏️ Таҳрир (паёми таҳриршуда): {ON if ex['notify_edit'] else OFF}\n"
+            f"👥 Шрифт дар гурӯҳҳо: {ON if ex['groups'] else OFF}\n"
+            f"🤖 Авточавоб: {ar_state}\n"
+            f"🔤 Шрифти ҳозира: <b>{fonts.font_name(user['font'])}</b>\n"
+            f"🌐 Забон: <b>{lang_name}</b>\n\n"
+            "ℹ️ <i>Удалит/Таҳрир: вақте шахси дигар дар чатҳои Business паёмро нест ё таҳрир кунад, "
+            "бот матни онро ба шумо мефиристад (танҳо аз лаҳзаи фаъол кардан).\n"
+            "Дар гурӯҳ: /f матн — бот матнро бо шрифти шумо мефиристад.</i>"
+        )
 
     def tgl(label: str, cb_data: str, on) -> InlineKeyboardButton:
         return btn(f"{label} {onoff(on)}", cb_data, style="success" if on else "danger")
 
     markup = kb([
-        [tgl("🔄 Табдили худкор", "toggle_auto", user["auto"])],
-        [tgl("⌨️ Навишти оҳиста", "toggle_typing", ex["typing"])],
-        [tgl("🗑 Удалит", "toggle_del", ex["notify_del"]), tgl("✏️ Таҳрир", "toggle_edit", ex["notify_edit"])],
-        [tgl("👥 Шрифт дар гурӯҳҳо", "toggle_groups", ex["groups"])],
-        [btn("🤖 Авточавоб", "ar", style="primary"), btn("🔤 Шрифтҳо", "fonts", style="primary")],
+        [tgl(p("🔄 Табдили худкор", "🔄 Автозамена"), "toggle_auto", user["auto"])],
+        [tgl(p("⌨️ Навишти оҳиста", "⌨️ Медленный набор"), "toggle_typing", ex["typing"])],
+        [tgl("🗑 Удалит", "toggle_del", ex["notify_del"]),
+         tgl(p("✏️ Таҳрир", "✏️ Правка"), "toggle_edit", ex["notify_edit"])],
+        [tgl(p("👥 Шрифт дар гурӯҳҳо", "👥 Шрифт в группах"), "toggle_groups", ex["groups"])],
+        [btn(p("🤖 Авточавоб", "🤖 Автоответчик"), "ar", style="primary"), btn("🔤 Шрифтҳо", "fonts", style="primary")],
+        [btn("🌐 Забон / Язык", "lang", style="primary")],
         [BACK],
     ])
     await show(cb, text, markup)
@@ -611,20 +698,39 @@ async def cb_ar_bdel(cb: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "cabinet")
 async def cb_cabinet(cb: CallbackQuery) -> None:
-    u = await db.get_user(cb.from_user.id)
+    uid = cb.from_user.id
+    p = lambda tg, ru: botlang.pick(uid, tg, ru)  # noqa: E731
+    u = await db.get_user(uid)
     username = f"@{u['username']}" if u["username"] else "—"
-    sub = f"✅ то {fmt_date(u['sub_until'])}" if is_active(u) else "❌ нест"
-    business = "✅ пайваст" if await db.has_connection(u["id"]) else "❌ пайваст нест"
-    text = (
-        "👤 <b>Кабинети шахсии шумо</b>\n\n"
-        f"🪪 Ном: {html.escape(u['name'] or '—')}\n"
-        f"🔗 Юзернейм: {html.escape(username)}\n"
-        f"🆔 ID: <code>{u['id']}</code>\n"
-        f"⏳ Обуна: {sub}\n"
-        f"🔤 Шрифт: {fonts.font_name(u['font'])}\n"
-        f"💼 Business: {business}\n"
-        f"👥 Рефералҳо: {u['invited']} | ⭐ Холҳо: {u['points']}/{config.REF_TARGET}"
+    sub = (
+        p(f"✅ то {fmt_date(u['sub_until'])}", f"✅ до {fmt_date(u['sub_until'])}")
+        if is_active(u) else p("❌ нест", "❌ нет")
     )
+    business = (
+        p("✅ пайваст", "✅ подключён") if await db.has_connection(u["id"]) else p("❌ пайваст нест", "❌ не подключён")
+    )
+    if botlang.get(uid) == "ru":
+        text = (
+            "👤 <b>Ваш личный кабинет</b>\n\n"
+            f"🪪 Имя: {html.escape(u['name'] or '—')}\n"
+            f"🔗 Юзернейм: {html.escape(username)}\n"
+            f"🆔 ID: <code>{u['id']}</code>\n"
+            f"⏳ Подписка: {sub}\n"
+            f"🔤 Шрифт: {fonts.font_name(u['font'])}\n"
+            f"💼 Business: {business}\n"
+            f"👥 Рефералы: {u['invited']} | ⭐ Баллы: {u['points']}/{config.REF_TARGET}"
+        )
+    else:
+        text = (
+            "👤 <b>Кабинети шахсии шумо</b>\n\n"
+            f"🪪 Ном: {html.escape(u['name'] or '—')}\n"
+            f"🔗 Юзернейм: {html.escape(username)}\n"
+            f"🆔 ID: <code>{u['id']}</code>\n"
+            f"⏳ Обуна: {sub}\n"
+            f"🔤 Шрифт: {fonts.font_name(u['font'])}\n"
+            f"💼 Business: {business}\n"
+            f"👥 Рефералҳо: {u['invited']} | ⭐ Холҳо: {u['points']}/{config.REF_TARGET}"
+        )
     await show(cb, text, kb([
         [btn("💳 Пардохт", "pay", style="success"), btn("⚙️ Танзимот", "settings", style="primary")],
         [BACK],
@@ -633,86 +739,146 @@ async def cb_cabinet(cb: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "info")
 async def cb_info(cb: CallbackQuery) -> None:
-    text = (
-        "📋 <b>Бот чӣ кор карда метавонад?</b>\n\n"
-        "• Матни шуморо ба 15 шрифти зебо табдил медиҳад.\n"
-        "• Режими inline: дар ҳар чат <code>@{bot} матн</code> нависед ва шрифтро интихоб кунед.\n"
-        "• Telegram Business: паёмҳои шумо дар чатҳо худкор бо шрифти интихобшуда иваз мешаванд "
-        "(бо обуна).\n"
-        "• Авточавоб: ба касе, ки ба шумо менависад, бот худкор ҷавоб медиҳад.\n"
-        "• Фармонҳо дар чат: /shrift1…/shrift15 — шрифт, /shrift0 — хомӯш, /hask — шӯхӣ.\n"
-        "• Системаи реферал: {t} дӯст = 1 моҳи ройгон."
-    ).format(bot=config.BOT_USERNAME, t=config.REF_TARGET)
+    if botlang.get(cb.from_user.id) == "ru":
+        text = (
+            "📋 <b>Что умеет бот?</b>\n\n"
+            "• Превращает ваш текст в 15 красивых шрифтов.\n"
+            "• Режим inline: в любом чате напишите <code>@{bot} текст</code> и выберите шрифт.\n"
+            "• Telegram Business: ваши сообщения в чатах автоматически заменяются выбранным шрифтом "
+            "(по подписке).\n"
+            "• Автоответчик: бот сам отвечает тем, кто вам пишет.\n"
+            "• Команды в чате: /shrift1…/shrift15 — шрифт, /shrift0 — выключить, /hask — шутка.\n"
+            "• Реферальная система: {t} друзей = 1 месяц бесплатно."
+        )
+    else:
+        text = (
+            "📋 <b>Бот чӣ кор карда метавонад?</b>\n\n"
+            "• Матни шуморо ба 15 шрифти зебо табдил медиҳад.\n"
+            "• Режими inline: дар ҳар чат <code>@{bot} матн</code> нависед ва шрифтро интихоб кунед.\n"
+            "• Telegram Business: паёмҳои шумо дар чатҳо худкор бо шрифти интихобшуда иваз мешаванд "
+            "(бо обуна).\n"
+            "• Авточавоб: ба касе, ки ба шумо менависад, бот худкор ҷавоб медиҳад.\n"
+            "• Фармонҳо дар чат: /shrift1…/shrift15 — шрифт, /shrift0 — хомӯш, /hask — шӯхӣ.\n"
+            "• Системаи реферал: {t} дӯст = 1 моҳи ройгон."
+        )
+    text = text.format(bot=config.BOT_USERNAME, t=config.REF_TARGET)
     await show(cb, text, kb([[BACK]]))
 
 
 @router.callback_query(F.data == "connect")
 async def cb_connect(cb: CallbackQuery) -> None:
-    text = (
-        "🔌 <b>Тарзи пайваст кардани бот ба Business</b>\n\n"
-        "1. Telegram → <b>Танзимот</b> → <b>Telegram Business</b> → <b>Чат-ботҳо</b>.\n"
-        f"2. Номи ботро нависед: <code>@{config.BOT_USERNAME}</code> ва интихоб кунед.\n"
-        "3. Чатҳоро интихоб кунед (масалан «Ҳамаи чатҳои шахсӣ»).\n"
-        "4. Иҷозатҳо: <b>Паёмҳоро хондан</b> ва <b>Ба паёмҳо ҷавоб додан</b> / "
-        "<b>Таҳрир</b> фаъол бошанд.\n"
-        "5. Обунаро фаъол кунед (💳 Пардохт) — ва паёмҳо худкор иваз мешаванд ✅\n\n"
-        "💡 Дар ҳар чат: <code>/shrift5</code> — шрифти 5, <code>/shrift0</code> — хомӯш, <code>/hask</code> — шӯхӣ.\n\n"
-        "ℹ️ Паёмҳои дорои линк, @ва кодро бот дастнорас мегузорад."
-    )
+    if botlang.get(cb.from_user.id) == "ru":
+        text = (
+            "🔌 <b>Как подключить бота к Business</b>\n\n"
+            "1. Telegram → <b>Настройки</b> → <b>Telegram Business</b> → <b>Чат-боты</b>.\n"
+            f"2. Введите имя бота: <code>@{config.BOT_USERNAME}</code> и выберите его.\n"
+            "3. Выберите чаты (например «Все личные чаты»).\n"
+            "4. Разрешения: <b>Чтение сообщений</b> и <b>Ответ на сообщения</b> / "
+            "<b>Редактирование</b> должны быть включены.\n"
+            "5. Активируйте подписку (💳 Оплата) — и сообщения будут заменяться автоматически ✅\n\n"
+            "💡 В любом чате: <code>/shrift5</code> — шрифт 5, <code>/shrift0</code> — выключить, <code>/hask</code> — шутка.\n\n"
+            "ℹ️ Сообщения со ссылками, @ и кодом бот не трогает."
+        )
+    else:
+        text = (
+            "🔌 <b>Тарзи пайваст кардани бот ба Business</b>\n\n"
+            "1. Telegram → <b>Танзимот</b> → <b>Telegram Business</b> → <b>Чат-ботҳо</b>.\n"
+            f"2. Номи ботро нависед: <code>@{config.BOT_USERNAME}</code> ва интихоб кунед.\n"
+            "3. Чатҳоро интихоб кунед (масалан «Ҳамаи чатҳои шахсӣ»).\n"
+            "4. Иҷозатҳо: <b>Паёмҳоро хондан</b> ва <b>Ба паёмҳо ҷавоб додан</b> / "
+            "<b>Таҳрир</b> фаъол бошанд.\n"
+            "5. Обунаро фаъол кунед (💳 Пардохт) — ва паёмҳо худкор иваз мешаванд ✅\n\n"
+            "💡 Дар ҳар чат: <code>/shrift5</code> — шрифти 5, <code>/shrift0</code> — хомӯш, <code>/hask</code> — шӯхӣ.\n\n"
+            "ℹ️ Паёмҳои дорои линк, @ва кодро бот дастнорас мегузорад."
+        )
     await show(cb, text, kb([[btn("💳 Пардохт", "pay", style="success")], [BACK]]))
 
 
 # ====================== Реферал ======================
 @router.callback_query(F.data == "ref")
 async def cb_ref(cb: CallbackQuery) -> None:
-    u = await db.get_user(cb.from_user.id)
+    uid = cb.from_user.id
+    u = await db.get_user(uid)
     link = f"https://t.me/{config.BOT_USERNAME}?start={u['id']}"
-    text = (
-        "👥 <b>Системаи Реферал</b>\n\n"
-        "Дӯстонро бо линки худ ба бот даъват кунед. Вақте дӯстатон ба бот медарояд"
-        f"{' ва ба каналҳои спонсор обуна мешавад' if config.SPONSOR_CHANNELS else ''} — "
-        "шумо 1 хол мегиред.\n"
-        f"⭐ Ба {config.REF_TARGET} хол расид — <b>обунаи 1 моҳа + тӯҳфаи Telegram</b> 🎁\n\n"
-        f"🔗 Линк: <code>{link}</code>\n"
-        f"📊 Даъватшуда: {u['invited']} нафар\n"
-        f"⭐ Холҳо: {u['points']} / {config.REF_TARGET}"
-    )
-    share = f"https://t.me/share/url?url={quote(link)}&text={quote('Боти шрифтҳои зебо 🔤')}"
-    await show(cb, text, kb([[btn("📤 Фиристодан ба дӯст", url=share, style="primary")], [BACK]]))
+    if botlang.get(uid) == "ru":
+        text = (
+            "👥 <b>Реферальная система</b>\n\n"
+            "Приглашайте друзей по своей ссылке. Когда друг зайдёт в бота"
+            f"{' и подпишется на каналы спонсоров' if config.SPONSOR_CHANNELS else ''} — "
+            "вы получите 1 балл.\n"
+            f"⭐ Набрали {config.REF_TARGET} баллов — <b>подписка на 1 месяц + подарок Telegram</b> 🎁\n\n"
+            f"🔗 Ссылка: <code>{link}</code>\n"
+            f"📊 Приглашено: {u['invited']} чел.\n"
+            f"⭐ Баллы: {u['points']} / {config.REF_TARGET}"
+        )
+        share_btn, share_msg = "📤 Отправить другу", "Бот красивых шрифтов 🔤"
+    else:
+        text = (
+            "👥 <b>Системаи Реферал</b>\n\n"
+            "Дӯстонро бо линки худ ба бот даъват кунед. Вақте дӯстатон ба бот медарояд"
+            f"{' ва ба каналҳои спонсор обуна мешавад' if config.SPONSOR_CHANNELS else ''} — "
+            "шумо 1 хол мегиред.\n"
+            f"⭐ Ба {config.REF_TARGET} хол расид — <b>обунаи 1 моҳа + тӯҳфаи Telegram</b> 🎁\n\n"
+            f"🔗 Линк: <code>{link}</code>\n"
+            f"📊 Даъватшуда: {u['invited']} нафар\n"
+            f"⭐ Холҳо: {u['points']} / {config.REF_TARGET}"
+        )
+        share_btn, share_msg = "📤 Фиристодан ба дӯст", "Боти шрифтҳои зебо 🔤"
+    share = f"https://t.me/share/url?url={quote(link)}&text={quote(share_msg)}"
+    await show(cb, text, kb([[btn(share_btn, url=share, style="primary")], [BACK]]))
 
 
 # ====================== Пардохт ======================
 @router.callback_query(F.data == "pay")
 async def cb_pay(cb: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    u = await db.get_user(cb.from_user.id)
-    now_state = f"✅ то {fmt_date(u['sub_until'])}" if is_active(u) else "❌ нест"
-    text = (
-        f"💳 <b>Пардохти обунаи моҳона</b>\n\n"
-        f"💰 Нарх: {config.PRICE_SOMONI} сомонӣ ё {config.STARS_PRICE} Stars ⭐\n"
-        f"⏳ Ҳозира: {now_state}\n\n"
-        "⭐ <b>Старс</b> — пардохт ва фаъолшавӣ дар ҳамон лаҳза.\n"
-        f"🏦 <b>{html.escape(config.CARD_BANK)}</b> — ба корт гузаронед ва чекро фиристед."
-    )
+    uid = cb.from_user.id
+    ru = botlang.get(uid) == "ru"
+    u = await db.get_user(uid)
+    if ru:
+        now_state = f"✅ до {fmt_date(u['sub_until'])}" if is_active(u) else "❌ нет"
+        text = (
+            "💳 <b>Оплата месячной подписки</b>\n\n"
+            f"💰 Цена: {config.PRICE_SOMONI} сомони или {config.STARS_PRICE} Stars ⭐\n"
+            f"⏳ Сейчас: {now_state}\n\n"
+            "⭐ <b>Stars</b> — оплата и активация сразу.\n"
+            f"🏦 <b>{html.escape(config.CARD_BANK)}</b> / <b>{html.escape(TBANK_NAME)}</b> — "
+            "переведите деньги и отправьте чек."
+        )
+    else:
+        now_state = f"✅ то {fmt_date(u['sub_until'])}" if is_active(u) else "❌ нест"
+        text = (
+            f"💳 <b>Пардохти обунаи моҳона</b>\n\n"
+            f"💰 Нарх: {config.PRICE_SOMONI} сомонӣ ё {config.STARS_PRICE} Stars ⭐\n"
+            f"⏳ Ҳозира: {now_state}\n\n"
+            "⭐ <b>Старс</b> — пардохт ва фаъолшавӣ дар ҳамон лаҳза.\n"
+            f"🏦 <b>{html.escape(config.CARD_BANK)}</b> / <b>{html.escape(TBANK_NAME)}</b> — "
+            "пул гузаронед ва чекро фиристед."
+        )
     await show(cb, text, kb([
         [
-            btn(f"⭐ Старс ({config.STARS_PRICE} ⭐)", "pay_stars", style="success"),
+            btn(f"⭐ Старс ({config.STARS_PRICE} ⭐)" if not ru else f"⭐ Stars ({config.STARS_PRICE} ⭐)",
+                "pay_stars", style="success"),
             btn(f"🏦 {config.CARD_BANK}", "pay_card", style="success"),
         ],
+        [btn(f"🏦 {TBANK_NAME}", "pay_tbank", style="success")],
         [BACK],
     ]))
 
 
 @router.callback_query(F.data == "pay_stars")
 async def cb_pay_stars(cb: CallbackQuery, bot: Bot) -> None:
+    ru = botlang.get(cb.from_user.id) == "ru"
     await bot.send_invoice(
         chat_id=cb.from_user.id,
-        title="Обунаи 1 моҳа",
-        description="Табдили худкори шрифт дар Telegram Business",
+        title="Подписка на 1 месяц" if ru else "Обунаи 1 моҳа",
+        description=(
+            "Автозамена шрифта в Telegram Business" if ru else "Табдили худкори шрифт дар Telegram Business"
+        ),
         payload=f"sub:{config.SUB_DAYS}",
         provider_token="",
         currency="XTR",
-        prices=[LabeledPrice(label="Обуна", amount=config.STARS_PRICE)],
+        prices=[LabeledPrice(label="Подписка" if ru else "Обуна", amount=config.STARS_PRICE)],
     )
     await cb.answer()
 
@@ -728,35 +894,83 @@ async def on_paid(message: Message) -> None:
     until = await db.extend_sub(uid, config.SUB_DAYS)
     await db.add_payment(uid, "stars", "approved")
     await message.answer(
-        f"✅ Пардохт қабул шуд! Обуна то <b>{fmt_date(until)}</b> фаъол аст.", reply_markup=menu_kb(uid)
+        botlang.pick(
+            uid,
+            f"✅ Пардохт қабул шуд! Обуна то <b>{fmt_date(until)}</b> фаъол аст.",
+            f"✅ Оплата принята! Подписка активна до <b>{fmt_date(until)}</b>.",
+        ),
+        reply_markup=menu_kb(uid),
     )
+
+
+async def show_card_page(
+    cb: CallbackQuery, state: FSMContext, bank: str, number: str, holder: str, amount: str
+) -> None:
+    uid = cb.from_user.id
+    ru = botlang.get(uid) == "ru"
+    await state.set_state(PayStates.proof)
+    await state.update_data(bank=bank, amount=amount)
+    if ru:
+        holder_line = f"\n👤 Получатель: {html.escape(holder)}" if holder else ""
+        text = (
+            f"🏦 <b>{html.escape(bank)}</b>\n\n"
+            f"Номер: <code>{html.escape(number)}</code>{holder_line}\n"
+            f"Сумма: <b>{html.escape(amount)}</b>\n\n"
+            "После перевода отправьте сюда скриншот чека 📸"
+        )
+    else:
+        holder_line = f"\n👤 Ном: {html.escape(holder)}" if holder else ""
+        text = (
+            f"🏦 <b>{html.escape(bank)}</b>\n\n"
+            f"Рақам: <code>{html.escape(number)}</code>{holder_line}\n"
+            f"Маблағ: <b>{html.escape(amount)}</b>\n\n"
+            "Пас аз гузаронидан скриншоти чекро ҳамин ҷо фиристед 📸"
+        )
+    await show(cb, text, kb([[BACK]]))
 
 
 @router.callback_query(F.data == "pay_card")
 async def cb_pay_card(cb: CallbackQuery, state: FSMContext) -> None:
     if not config.CARD_NUMBER:
-        return await cb.answer("Пардохт бо корт ҳанӯз танзим нашудааст", show_alert=True)
-    await state.set_state(PayStates.proof)
-    holder = f"\n👤 Ном: {html.escape(config.CARD_HOLDER)}" if config.CARD_HOLDER else ""
-    text = (
-        f"🏦 <b>{html.escape(config.CARD_BANK)}</b>\n\n"
-        f"Рақам: <code>{html.escape(config.CARD_NUMBER)}</code>{holder}\n"
-        f"Маблағ: <b>{config.PRICE_SOMONI} сомонӣ</b>\n\n"
-        "Пас аз гузаронидан скриншоти чекро ҳамин ҷо фиристед 📸"
-    )
-    await show(cb, text, kb([[BACK]]))
+        return await cb.answer(
+            botlang.pick(cb.from_user.id, "Пардохт бо корт ҳанӯз танзим нашудааст", "Оплата картой ещё не настроена"),
+            show_alert=True,
+        )
+    ru = botlang.get(cb.from_user.id) == "ru"
+    amount = f"{config.PRICE_SOMONI} {'сомони' if ru else 'сомонӣ'}"
+    await show_card_page(cb, state, config.CARD_BANK, config.CARD_NUMBER, config.CARD_HOLDER or "", amount)
+
+
+@router.callback_query(F.data == "pay_tbank")
+async def cb_pay_tbank(cb: CallbackQuery, state: FSMContext) -> None:
+    ru = botlang.get(cb.from_user.id) == "ru"
+    if TBANK_PRICE_RUB:
+        amount = f"{TBANK_PRICE_RUB} ₽"
+    else:
+        amount = f"{config.PRICE_SOMONI} {'сомони' if ru else 'сомонӣ'}"
+    await show_card_page(cb, state, TBANK_NAME, TBANK_NUMBER, TBANK_HOLDER, amount)
 
 
 @router.message(PayStates.proof, F.photo)
 async def on_proof(message: Message, state: FSMContext, bot: Bot) -> None:
+    data = await state.get_data()
+    bank = data.get("bank") or config.CARD_BANK
+    amount = data.get("amount") or f"{config.PRICE_SOMONI} сомонӣ"
     file_id = message.photo[-1].file_id
     pid = await db.add_payment(message.from_user.id, "card", "pending", file_id)
     await state.clear()
-    await message.answer("⏳ Чек фиристода шуд. Админ ба наздикӣ санҷида, обунаро фаъол мекунад.")
+    await message.answer(
+        botlang.pick(
+            message.from_user.id,
+            "⏳ Чек фиристода шуд. Админ ба наздикӣ санҷида, обунаро фаъол мекунад.",
+            "⏳ Чек отправлен. Админ скоро проверит его и активирует подписку.",
+        )
+    )
     caption = (
         f"💳 Пардохти нав #{pid}\n"
         f"Корбар: {html.escape(message.from_user.full_name)} (<code>{message.from_user.id}</code>)\n"
-        f"Маблағ: {config.PRICE_SOMONI} сомонӣ"
+        f"Банк: {html.escape(bank)}\n"
+        f"Маблағ: {html.escape(amount)}"
     )
     markup = kb([[
         btn("✅ Тасдиқ", f"appr:{pid}", style="success"),
@@ -771,7 +985,13 @@ async def on_proof(message: Message, state: FSMContext, bot: Bot) -> None:
 
 @router.message(PayStates.proof)
 async def on_proof_wrong(message: Message) -> None:
-    await message.answer("📸 Лутфан скриншоти чекро ҳамчун расм фиристед.")
+    await message.answer(
+        botlang.pick(
+            message.from_user.id,
+            "📸 Лутфан скриншоти чекро ҳамчун расм фиристед.",
+            "📸 Пожалуйста, отправьте скриншот чека как фото.",
+        )
+    )
 
 
 @router.callback_query(F.data.regexp(r"^(appr|rej):\d+$"))
@@ -786,11 +1006,25 @@ async def on_admin_decision(cb: CallbackQuery, bot: Bot) -> None:
     if action == "appr":
         until = await db.extend_sub(uid, config.SUB_DAYS)
         await db.set_payment_status(payment["id"], "approved")
-        await bot.send_message(uid, f"✅ Пардохт тасдиқ шуд! Обуна то <b>{fmt_date(until)}</b> фаъол аст.")
+        await bot.send_message(
+            uid,
+            botlang.pick(
+                uid,
+                f"✅ Пардохт тасдиқ шуд! Обуна то <b>{fmt_date(until)}</b> фаъол аст.",
+                f"✅ Оплата подтверждена! Подписка активна до <b>{fmt_date(until)}</b>.",
+            ),
+        )
         result = "✅ Тасдиқ шуд"
     else:
         await db.set_payment_status(payment["id"], "rejected")
-        await bot.send_message(uid, "❌ Пардохт рад шуд. Агар хато бошад, ба дастгирӣ нависед.")
+        await bot.send_message(
+            uid,
+            botlang.pick(
+                uid,
+                "❌ Пардохт рад шуд. Агар хато бошад, ба дастгирӣ нависед.",
+                "❌ Оплата отклонена. Если это ошибка, напишите в поддержку.",
+            ),
+        )
         result = "❌ Рад шуд"
     try:
         await cb.message.edit_caption(caption=f"{cb.message.caption}\n\n{result}", reply_markup=None)
@@ -938,7 +1172,14 @@ async def cb_adm_grant(cb: CallbackQuery, bot: Bot) -> None:
         return await cb.answer("Корбар ёфт нашуд", show_alert=True)
     until = await db.extend_sub(uid, days)
     try:
-        await bot.send_message(uid, f"🎁 Ба шумо обуна дода шуд — то <b>{fmt_date(until)}</b>.")
+        await bot.send_message(
+            uid,
+            botlang.pick(
+                uid,
+                f"🎁 Ба шумо обуна дода шуд — то <b>{fmt_date(until)}</b>.",
+                f"🎁 Вам выдана подписка — до <b>{fmt_date(until)}</b>.",
+            ),
+        )
     except Exception:  # noqa: BLE001
         pass
     await adm_card(cb, uid, f"✅ +{days} рӯз дода шуд.")
@@ -1077,7 +1318,7 @@ async def cb_adm_csv(cb: CallbackQuery, bot: Bot) -> None:
 async def send_backups(bot: Bot, chat_id: int, auto: bool = False) -> bool:
     c = await admintools.counts()
     if auto and (not c or c["total"] == 0):
-        return False  # базаи холиро ҳамчун backup намефиристем
+        return False
     stamp = datetime.now().strftime("%Y%m%d_%H%M")
     cap = (
         f"💾 Backup — {stamp}\n👥 {c['total']} корбар, ✅ {c['active']} обуна"
@@ -1146,7 +1387,7 @@ async def adm_restore_wrong(message: Message) -> None:
 
 
 async def auto_backup(bot: Bot) -> None:
-    """Ҳар 6 соат backup ба админҳо мефиристад (то маълумот ҳеҷ гоҳ гум нашавад)."""
+    """Ҳар 6 соат backup ба админҳо мефиристад."""
     await asyncio.sleep(300)
     while True:
         for admin_id in config.ADMIN_IDS:
@@ -1158,7 +1399,6 @@ async def auto_backup(bot: Bot) -> None:
 
 
 async def startup_check(bot: Bot) -> None:
-    """Агар база хол бошад (масалан пас аз навсозӣ) — ба админ хабар медиҳад."""
     try:
         c = await admintools.counts()
         if c is not None and c["total"] == 0:
@@ -1192,7 +1432,14 @@ async def cmd_grant(message: Message, command: CommandObject, bot: Bot) -> None:
     until = await db.extend_sub(uid, days)
     await message.answer(f"✅ Обуна то {fmt_date(until)}")
     try:
-        await bot.send_message(uid, f"🎁 Ба шумо обуна дода шуд — то <b>{fmt_date(until)}</b>.")
+        await bot.send_message(
+            uid,
+            botlang.pick(
+                uid,
+                f"🎁 Ба шумо обуна дода шуд — то <b>{fmt_date(until)}</b>.",
+                f"🎁 Вам выдана подписка — до <b>{fmt_date(until)}</b>.",
+            ),
+        )
     except Exception:  # noqa: BLE001
         pass
 
@@ -1201,13 +1448,19 @@ async def cmd_grant(message: Message, command: CommandObject, bot: Bot) -> None:
 @router.business_connection()
 async def on_business_connection(connection: BusinessConnection, bot: Bot) -> None:
     await db.save_connection(connection.id, connection.user.id, connection.is_enabled)
-    text = (
-        f"🔌 Бот ба аккаунти шумо пайваст шуд! (@{config.BOT_USERNAME})\n"
-        "/shrift1 … /shrift15 — шрифтро иваз кардан, /shrift0 — хомӯш кардан\n"
-        "/hask — шӯхӣ"
-        if connection.is_enabled
-        else "ℹ️ Бот аз Telegram Business ҷудо шуд."
-    )
+    uid = connection.user.id
+    if connection.is_enabled:
+        text = botlang.pick(
+            uid,
+            f"🔌 Бот ба аккаунти шумо пайваст шуд! (@{config.BOT_USERNAME})\n"
+            "/shrift1 … /shrift15 — шрифтро иваз кардан, /shrift0 — хомӯш кардан\n"
+            "/hask — шӯхӣ",
+            f"🔌 Бот подключён к вашему аккаунту! (@{config.BOT_USERNAME})\n"
+            "/shrift1 … /shrift15 — сменить шрифт, /shrift0 — выключить\n"
+            "/hask — шутка",
+        )
+    else:
+        text = botlang.pick(uid, "ℹ️ Бот аз Telegram Business ҷудо шуд.", "ℹ️ Бот отключён от Telegram Business.")
     try:
         await bot.send_message(connection.user_chat_id, text, parse_mode=None)
     except Exception as e:  # noqa: BLE001
@@ -1277,7 +1530,7 @@ async def handle_incoming(bot: Bot, message: Message, owner_id: int, conn_id: st
         )
     except Exception as e:  # noqa: BLE001
         log.warning("autoreply failed, retry plain: %s", e)
-        try:  # масалан эмодзии premium иҷозат набошад
+        try:
             await bot.send_message(
                 chat_id=message.chat.id,
                 text=extras.strip_tags(text),
@@ -1295,12 +1548,10 @@ async def on_business_message(message: Message, bot: Bot) -> None:
     if owner_id is None or not message.from_user:
         return
 
-    # Паёми шахси дигар -> кэш + авточавоб
     if message.from_user.id != owner_id:
         await handle_incoming(bot, message, owner_id, conn_id)
         return
 
-    # Аз ин ҷо: паёми худи соҳиби аккаунт
     user = await db.get_user(owner_id)
     if not user or not has_access(owner_id, user):
         return
@@ -1308,19 +1559,24 @@ async def on_business_message(message: Message, bot: Bot) -> None:
     text = message.text
     low = text.strip().lower()
 
-    # /shrift1 … /shrift15, /shrift0
     m = re.fullmatch(r"/shrift\s*(\d{1,2})", low)
     if m:
         fid = int(m.group(1))
         if fid != 0 and fid not in {f[0] for f in fonts.FONTS}:
-            await biz_edit(bot, message, conn_id, f"⚠️ Чунин шрифт нест. Аз 1 то {len(fonts.FONTS)} интихоб кунед.")
+            await biz_edit(
+                bot, message, conn_id,
+                botlang.pick(
+                    owner_id,
+                    f"⚠️ Чунин шрифт нест. Аз 1 то {len(fonts.FONTS)} интихоб кунед.",
+                    f"⚠️ Такого шрифта нет. Выберите от 1 до {len(fonts.FONTS)}.",
+                ),
+            )
             return
         await db.set_font(owner_id, fid)
-        label = "хомӯш шуд" if fid == 0 else fonts.font_name(fid)
+        label = botlang.pick(owner_id, "хомӯш шуд", "выключен") if fid == 0 else fonts.font_name(fid)
         await biz_edit(bot, message, conn_id, f"✅ Шрифт: {label}")
         return
 
-    # /hask — шӯхии бе зарар
     if low == "/hask":
         frames = extras.hask_frames(config.BOT_USERNAME)
         for i, fr in enumerate(frames):
@@ -1340,7 +1596,6 @@ async def on_business_message(message: Message, bot: Bot) -> None:
     if new_text == text:
         return
 
-    # Навишти оҳиста: матн ҳарф ба ҳарф пайдо мешавад
     ex = await extras.get(owner_id)
     if ex["typing"]:
         for fr in extras.typing_frames(new_text):
@@ -1355,7 +1610,6 @@ def _short(s: str, n: int = 900) -> str:
     return html.escape(s if len(s) <= n else s[:n] + "…")
 
 
-# Удалит: паёми нестшуда (бо ҳифзи эҳтиёт, агар aiogram кӯҳна бошад, бот намеафтад)
 if hasattr(router, "deleted_business_messages"):
 
     @router.deleted_business_messages()
@@ -1373,13 +1627,16 @@ if hasattr(router, "deleted_business_messages"):
             try:
                 await bot.send_message(
                     owner_id,
-                    f"🗑 <b>{html.escape(name)}</b> паёмро нест кард:\n<blockquote>{_short(text)}</blockquote>",
+                    botlang.pick(
+                        owner_id,
+                        f"🗑 <b>{html.escape(name)}</b> паёмро нест кард:\n<blockquote>{_short(text)}</blockquote>",
+                        f"🗑 <b>{html.escape(name)}</b> удалил(а) сообщение:\n<blockquote>{_short(text)}</blockquote>",
+                    ),
                 )
             except Exception as e:  # noqa: BLE001
                 log.warning("deleted notify failed: %s", e)
 
 
-# Таҳрир: паёми таҳриршуда
 if hasattr(router, "edited_business_message"):
 
     @router.edited_business_message(F.text)
@@ -1402,9 +1659,15 @@ if hasattr(router, "edited_business_message"):
         try:
             await bot.send_message(
                 owner_id,
-                f"✏️ <b>{html.escape(message.from_user.full_name)}</b> паёмро таҳрир кард:\n\n"
-                f"Пеш:\n<blockquote>{_short(old[1])}</blockquote>\n"
-                f"Ҳозир:\n<blockquote>{_short(message.text)}</blockquote>",
+                botlang.pick(
+                    owner_id,
+                    f"✏️ <b>{html.escape(message.from_user.full_name)}</b> паёмро таҳрир кард:\n\n"
+                    f"Пеш:\n<blockquote>{_short(old[1])}</blockquote>\n"
+                    f"Ҳозир:\n<blockquote>{_short(message.text)}</blockquote>",
+                    f"✏️ <b>{html.escape(message.from_user.full_name)}</b> изменил(а) сообщение:\n\n"
+                    f"Было:\n<blockquote>{_short(old[1])}</blockquote>\n"
+                    f"Стало:\n<blockquote>{_short(message.text)}</blockquote>",
+                ),
             )
         except Exception as e:  # noqa: BLE001
             log.warning("edited notify failed: %s", e)
@@ -1417,7 +1680,7 @@ async def on_inline(query: InlineQuery) -> None:
     if not text:
         hint = InlineQueryResultArticle(
             id="hint",
-            title="Матн нависед",
+            title=botlang.pick(query.from_user.id, "Матн нависед", "Напишите текст"),
             description=f"@{config.BOT_USERNAME} Салом дунё",
             input_message_content=InputTextMessageContent(message_text=f"@{config.BOT_USERNAME}"),
         )
@@ -1442,24 +1705,29 @@ GROUP_CMD = re.compile(r"^/(?:f|shrift)(?:@\w+)?\s+(.+)$", re.I | re.S)
 
 @router.message(F.text, F.chat.type.in_({"group", "supergroup"}))
 async def group_font(message: Message) -> None:
-    """Дар гурӯҳ: /f матн — бот матнро бо шрифти шумо мефиристад."""
     m = GROUP_CMD.match(message.text.strip())
     if not m or not message.from_user:
         return
     uid = message.from_user.id
+    p = lambda tg, ru: botlang.pick(uid, tg, ru)  # noqa: E731
     user = await db.get_user(uid)
     if not user:
-        return await message.reply(f"Аввал ботро оғоз кунед: @{config.BOT_USERNAME}")
+        return await message.reply(p(f"Аввал ботро оғоз кунед: @{config.BOT_USERNAME}", f"Сначала запустите бота: @{config.BOT_USERNAME}"))
     if not has_access(uid, user):
-        return await message.reply("🔒 Ин имконият барои обунахандагон аст.")
+        return await message.reply(p("🔒 Ин имконият барои обунахандагон аст.", "🔒 Эта функция для подписчиков."))
     ex = await extras.get(uid)
     if not ex["groups"]:
-        return await message.reply("Шрифт дар гурӯҳҳо дар Танзимот хомӯш аст.")
+        return await message.reply(p("Шрифт дар гурӯҳҳо дар Танзимот хомӯш аст.", "Шрифт в группах выключен в Настройках."))
     if not user["font"]:
-        return await message.reply(f"Аввал шрифтро интихоб кунед: @{config.BOT_USERNAME} → «🔤 Шрифтҳо»")
+        return await message.reply(
+            p(
+                f"Аввал шрифтро интихоб кунед: @{config.BOT_USERNAME} → «🔤 Шрифтҳо»",
+                f"Сначала выберите шрифт: @{config.BOT_USERNAME} → «🔤 Шрифты»",
+            )
+        )
     styled = fonts.apply_font(user["font"], m.group(1))
     await message.answer(f"👤 {message.from_user.full_name}:\n{styled}", parse_mode=None)
-    try:  # агар бот иҷозати нест кардан дошта бошад, фармони аслиро нест мекунад
+    try:
         await message.delete()
     except Exception:  # noqa: BLE001
         pass
@@ -1472,13 +1740,18 @@ async def convert_private(message: Message) -> None:
         return
     user = await db.get_user(message.from_user.id)
     if not user or not user["font"]:
-        return await message.answer("Аввал шрифтро интихоб кунед: /start → «🔤 Шрифтҳо»")
+        return await message.answer(
+            botlang.pick(
+                message.from_user.id,
+                "Аввал шрифтро интихоб кунед: /start → «🔤 Шрифтҳо»",
+                "Сначала выберите шрифт: /start → «🔤 Шрифты»",
+            )
+        )
     await message.answer(fonts.apply_font(user["font"], message.text), parse_mode=None)
 
 
 # ====================== Оғоз ======================
 def make_session() -> AiohttpSession:
-    """Сессия бо IPv4 ва пайвастагии нав барои ҳар дархост (ҳал барои Request timeout дар Railway)."""
     session = AiohttpSession(timeout=60)
     try:
         session._connector_init["family"] = socket.AF_INET
@@ -1491,13 +1764,13 @@ def make_session() -> AiohttpSession:
 async def main() -> None:
     await db.init()
     await extras.init()
+    await botlang.init()
     bot = Bot(
         token=config.BOT_TOKEN,
         session=make_session(),
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
-    # Агар Telegram дар оғоз ҷавоб надиҳад, бот намеафтад, балки такрор мекунад
     while True:
         try:
             me = await bot.get_me()
