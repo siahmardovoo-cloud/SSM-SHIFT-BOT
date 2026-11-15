@@ -1,7 +1,9 @@
 import asyncio
 import html
+import io
 import json
 import logging
+import os
 import re
 import socket
 import time
@@ -12,12 +14,13 @@ from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
+    BufferedInputFile,
     BusinessConnection,
     CallbackQuery,
     InlineKeyboardButton,
@@ -30,6 +33,7 @@ from aiogram.types import (
     PreCheckoutQuery,
 )
 
+import admintools
 import config
 import db
 import extras
@@ -92,7 +96,7 @@ def is_active(user) -> bool:
     return bool(user) and (user["sub_until"] or 0) > time.time()
 
 
-def menu_kb() -> InlineKeyboardMarkup:
+def menu_kb(uid: int | None = None) -> InlineKeyboardMarkup:
     support = (
         btn("📞 Дастгирӣ", url=f"https://t.me/{config.SUPPORT_USERNAME.lstrip('@')}", style="success")
         if config.SUPPORT_USERNAME
@@ -108,7 +112,7 @@ def menu_kb() -> InlineKeyboardMarkup:
         [btn("👤 Кабинет", "cabinet", style="primary"), btn("📋 Маълумот", "info", style="primary")],
         [btn("💳 Пардохт", "pay", style="success"), btn("👥 Реферал", "ref", style="success")],
         [btn("🔌 Пайваст кардан", "connect", style="success"), support],
-        [lessons],
+        [lessons, btn("🛠 Панели Админ", "adm", style="danger")] if (uid in config.ADMIN_IDS) else [lessons],
     ])
 
 
@@ -231,17 +235,17 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     text = welcome_text(message.from_user.full_name)
     if config.WELCOME_VIDEO:
         try:
-            await message.answer_video(config.WELCOME_VIDEO, caption=text, reply_markup=menu_kb())
+            await message.answer_video(config.WELCOME_VIDEO, caption=text, reply_markup=menu_kb(message.from_user.id))
             return
         except Exception as e:  # noqa: BLE001
             log.warning("welcome video failed: %s", e)
-    await message.answer(text, reply_markup=menu_kb())
+    await message.answer(text, reply_markup=menu_kb(message.from_user.id))
 
 
 @router.callback_query(F.data.in_({"menu", "check_sub"}))
 async def cb_menu(cb: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    await show(cb, welcome_text(cb.from_user.full_name), menu_kb())
+    await show(cb, welcome_text(cb.from_user.full_name), menu_kb(cb.from_user.id))
 
 
 @router.callback_query(F.data.in_({"no_support", "no_lessons"}))
@@ -724,7 +728,7 @@ async def on_paid(message: Message) -> None:
     until = await db.extend_sub(uid, config.SUB_DAYS)
     await db.add_payment(uid, "stars", "approved")
     await message.answer(
-        f"✅ Пардохт қабул шуд! Обуна то <b>{fmt_date(until)}</b> фаъол аст.", reply_markup=menu_kb()
+        f"✅ Пардохт қабул шуд! Обуна то <b>{fmt_date(until)}</b> фаъол аст.", reply_markup=menu_kb(uid)
     )
 
 
@@ -793,6 +797,379 @@ async def on_admin_decision(cb: CallbackQuery, bot: Bot) -> None:
     except TelegramBadRequest:
         pass
     await cb.answer(result)
+
+
+# ====================== Панели Админ ======================
+class AdminStates(StatesGroup):
+    find = State()
+    bc = State()
+    restore = State()
+
+
+def is_admin(uid: int) -> bool:
+    return uid in config.ADMIN_IDS
+
+
+async def adm_guard(cb: CallbackQuery) -> bool:
+    if is_admin(cb.from_user.id):
+        return True
+    await cb.answer("Танҳо барои админ", show_alert=True)
+    return False
+
+
+async def adm_panel(event) -> None:
+    c = await admintools.counts()
+    if c is None:
+        stats = "⚠️ Ҷадвали корбарон ёфт нашуд."
+    else:
+        stats = (
+            f"👥 Корбарон: <b>{c['total']}</b>\n"
+            f"✅ Обунаи фаъол: <b>{c['active']}</b>\n"
+            f"⌛ Обунаи гузашта: <b>{c['expired']}</b>"
+        )
+    text = (
+        "🛠 <b>Панели Админ</b>\n\n"
+        f"{stats}\n\n"
+        f"💾 Файли база: <code>{html.escape(admintools.db_path())}</code>"
+    )
+    markup = kb([
+        [btn("✅ Обунахандагон", "adm_l:active:0", style="success"), btn("🔎 Ёфтани корбар", "adm_find", style="primary")],
+        [btn("📣 Паёми умумӣ", "adm_bc", style="primary"), btn("📄 Рӯйхат (CSV)", "adm_csv", style="primary")],
+        [btn("💾 Backup", "adm_bk", style="success"), btn("♻️ Барқарорсозӣ", "adm_rs", style="danger")],
+        [BACK],
+    ])
+    await show(event, text, markup)
+
+
+@router.callback_query(F.data == "adm")
+async def cb_adm(cb: CallbackQuery, state: FSMContext) -> None:
+    if not await adm_guard(cb):
+        return
+    await state.clear()
+    await adm_panel(cb)
+
+
+KINDS = {"active": "✅ Обунахандагон", "expired": "⌛ Обунаи гузашта", "all": "👥 Ҳамаи корбарон"}
+
+
+def user_label(r) -> str:
+    mark = "✅" if (r["sub_until"] or 0) > time.time() else "▫️"
+    name = (r["name"] or "—")[:20]
+    uname = f" @{r['username']}" if r["username"] else ""
+    return f"{mark} {name}{uname}"[:60]
+
+
+@router.callback_query(F.data.startswith("adm_l:"))
+async def cb_adm_list(cb: CallbackQuery) -> None:
+    if not await adm_guard(cb):
+        return
+    _, kind, page_s = cb.data.split(":")
+    if kind not in KINDS:
+        return await cb.answer()
+    page = max(0, int(page_s))
+    per = 8
+    rows, total = await admintools.list_users(kind, page, per)
+    pages = max(1, (total + per - 1) // per)
+    if page >= pages:
+        page = pages - 1
+        rows, total = await admintools.list_users(kind, page, per)
+    text = f"<b>{KINDS[kind]}</b> — {total} нафар (саҳ. {page + 1}/{pages})"
+    if not rows:
+        text += "\n\nХолӣ аст."
+    buttons = [[btn(user_label(r), f"adm_u:{r['id']}", style="primary")] for r in rows]
+    nav = []
+    if page > 0:
+        nav.append(btn("◀️", f"adm_l:{kind}:{page - 1}"))
+    if page + 1 < pages:
+        nav.append(btn("▶️", f"adm_l:{kind}:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([
+        btn("✅ Фаъол", "adm_l:active:0", style="success"),
+        btn("⌛ Гузашта", "adm_l:expired:0", style="danger"),
+        btn("👥 Ҳама", "adm_l:all:0", style="primary"),
+    ])
+    buttons.append([btn("⬅️ Панел", "adm", style="danger")])
+    await show(cb, text, kb(buttons))
+
+
+async def adm_card(event, uid: int, notice: str = "") -> None:
+    u = await db.get_user(uid)
+    if not u:
+        if isinstance(event, CallbackQuery):
+            return await event.answer("Корбар ёфт нашуд", show_alert=True)
+        return await event.answer("Корбар ёфт нашуд")
+    username = f"@{u['username']}" if u["username"] else "—"
+    sub = f"✅ то {fmt_date(u['sub_until'])}" if is_active(u) else "❌ нест"
+    text = (
+        (f"{notice}\n\n" if notice else "")
+        + f"👤 <b>{html.escape(u['name'] or '—')}</b> ({html.escape(username)})\n"
+        f"🆔 <code>{u['id']}</code>\n"
+        f"⏳ Обуна: {sub}\n"
+        f"🔤 Шрифт: {fonts.font_name(u['font'])}\n"
+        f"👥 Рефералҳо: {u['invited']} | ⭐ Холҳо: {u['points']}"
+    )
+    markup = kb([
+        [
+            btn("🎁 +30 рӯз", f"adm_g:{uid}:30", style="success"),
+            btn("🎁 +90 рӯз", f"adm_g:{uid}:90", style="success"),
+            btn("🎁 +365", f"adm_g:{uid}:365", style="success"),
+        ],
+        [btn("🚫 Бекор кардани обуна", f"adm_r:{uid}", style="danger")],
+        [btn("⬅️ Рӯйхат", "adm_l:active:0", style="primary"), btn("🛠 Панел", "adm", style="danger")],
+    ])
+    await show(event, text, markup)
+
+
+@router.callback_query(F.data.regexp(r"^adm_u:\d+$"))
+async def cb_adm_user(cb: CallbackQuery) -> None:
+    if not await adm_guard(cb):
+        return
+    await adm_card(cb, int(cb.data.split(":")[1]))
+
+
+@router.callback_query(F.data.regexp(r"^adm_g:\d+:\d+$"))
+async def cb_adm_grant(cb: CallbackQuery, bot: Bot) -> None:
+    if not await adm_guard(cb):
+        return
+    _, uid_s, days_s = cb.data.split(":")
+    uid, days = int(uid_s), int(days_s)
+    if not await db.get_user(uid):
+        return await cb.answer("Корбар ёфт нашуд", show_alert=True)
+    until = await db.extend_sub(uid, days)
+    try:
+        await bot.send_message(uid, f"🎁 Ба шумо обуна дода шуд — то <b>{fmt_date(until)}</b>.")
+    except Exception:  # noqa: BLE001
+        pass
+    await adm_card(cb, uid, f"✅ +{days} рӯз дода шуд.")
+
+
+@router.callback_query(F.data.regexp(r"^adm_r:\d+$"))
+async def cb_adm_revoke(cb: CallbackQuery) -> None:
+    if not await adm_guard(cb):
+        return
+    uid = int(cb.data.split(":")[1])
+    await show(cb, f"🚫 Обунаи корбари <code>{uid}</code> бекор карда шавад?", kb([
+        [btn("✅ Ҳа, бекор кун", f"adm_ry:{uid}", style="danger")],
+        [btn("↩️ Не", f"adm_u:{uid}", style="primary")],
+    ]))
+
+
+@router.callback_query(F.data.regexp(r"^adm_ry:\d+$"))
+async def cb_adm_revoke_yes(cb: CallbackQuery) -> None:
+    if not await adm_guard(cb):
+        return
+    uid = int(cb.data.split(":")[1])
+    await admintools.set_sub(uid, 0)
+    await adm_card(cb, uid, "🚫 Обуна бекор шуд.")
+
+
+# ----- Ёфтани корбар -----
+@router.callback_query(F.data == "adm_find")
+async def cb_adm_find(cb: CallbackQuery, state: FSMContext) -> None:
+    if not await adm_guard(cb):
+        return
+    await state.set_state(AdminStates.find)
+    await show(cb, "🔎 ID, @юзернейм ё номи корбарро нависед:", kb([[btn("↩️ Бекор", "adm", style="primary")]]))
+
+
+@router.message(AdminStates.find, F.text)
+async def adm_find_msg(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    rows = await admintools.find(message.text)
+    if not rows:
+        return await message.answer("Ёфт нашуд. Дигар хел нависед ё «↩️ Бекор»-ро пахш кунед.")
+    await state.clear()
+    if len(rows) == 1:
+        return await adm_card(message, rows[0]["id"])
+    buttons = [[btn(user_label(r), f"adm_u:{r['id']}", style="primary")] for r in rows]
+    buttons.append([btn("🛠 Панел", "adm", style="danger")])
+    await message.answer(f"Ёфт шуд: {len(rows)} нафар", reply_markup=kb(buttons))
+
+
+# ----- Паёми умумӣ -----
+@router.callback_query(F.data == "adm_bc")
+async def cb_adm_bc(cb: CallbackQuery, state: FSMContext) -> None:
+    if not await adm_guard(cb):
+        return
+    c = await admintools.counts()
+    await state.set_state(AdminStates.bc)
+    total = c["total"] if c else 0
+    await show(
+        cb,
+        f"📣 <b>Паёми умумӣ</b>\n\nПаёмро нависед (матн, расм ё видео). Он ба <b>{total}</b> корбар фиристода мешавад.",
+        kb([[btn("↩️ Бекор", "adm", style="primary")]]),
+    )
+
+
+@router.message(AdminStates.bc)
+async def adm_bc_msg(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    await state.update_data(chat=message.chat.id, mid=message.message_id)
+    await message.reply(
+        "Ин паёмро ба ҳамаи корбарон мефиристед?",
+        reply_markup=kb([[
+            btn("✅ Фиристодан", "adm_bc_go", style="success"),
+            btn("❌ Бекор", "adm", style="danger"),
+        ]]),
+    )
+
+
+async def run_broadcast(bot: Bot, admin_id: int, from_chat: int, mid: int) -> None:
+    ids = await admintools.all_ids()
+    ok = blocked = failed = 0
+    for uid in ids:
+        for _ in range(2):
+            try:
+                await bot.copy_message(uid, from_chat, mid)
+                ok += 1
+                break
+            except TelegramRetryAfter as e:
+                await asyncio.sleep(e.retry_after + 1)
+            except TelegramForbiddenError:
+                blocked += 1
+                break
+            except Exception:  # noqa: BLE001
+                failed += 1
+                break
+        else:
+            failed += 1
+        await asyncio.sleep(0.05)
+    try:
+        await bot.send_message(
+            admin_id, f"📣 Тамом шуд!\n✅ Расид: {ok}\n🚫 Бот баста кардаанд: {blocked}\n⚠️ Хато: {failed}"
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@router.callback_query(F.data == "adm_bc_go")
+async def cb_adm_bc_go(cb: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    if not await adm_guard(cb):
+        return
+    data = await state.get_data()
+    await state.clear()
+    if not data.get("mid"):
+        return await cb.answer("Паём ёфт нашуд", show_alert=True)
+    try:
+        await cb.message.edit_text("📣 Фиристодан оғоз шуд. Вақте тамом шавад, натиҷа меояд.")
+    except TelegramBadRequest:
+        pass
+    asyncio.create_task(run_broadcast(bot, cb.from_user.id, data["chat"], data["mid"]))
+    await cb.answer()
+
+
+# ----- CSV -----
+@router.callback_query(F.data == "adm_csv")
+async def cb_adm_csv(cb: CallbackQuery, bot: Bot) -> None:
+    if not await adm_guard(cb):
+        return
+    data = await admintools.export_csv()
+    if not data:
+        return await cb.answer("Ҷадвал ёфт нашуд", show_alert=True)
+    await bot.send_document(cb.from_user.id, BufferedInputFile(data, filename="users.csv"), caption="📄 Рӯйхати корбарон")
+    await cb.answer()
+
+
+# ----- Backup / Барқарорсозӣ -----
+async def send_backups(bot: Bot, chat_id: int, auto: bool = False) -> bool:
+    c = await admintools.counts()
+    if auto and (not c or c["total"] == 0):
+        return False  # базаи холиро ҳамчун backup намефиристем
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    cap = (
+        f"💾 Backup — {stamp}\n👥 {c['total']} корбар, ✅ {c['active']} обуна"
+        if c else f"💾 Backup — {stamp}"
+    )
+    data = await admintools.snapshot(admintools.db_path())
+    await bot.send_document(chat_id, BufferedInputFile(data, filename=f"bot_{stamp}.db"), caption=cap)
+    if os.path.exists(extras.DB):
+        edata = await admintools.snapshot(extras.DB)
+        await bot.send_document(
+            chat_id, BufferedInputFile(edata, filename=f"extras_{stamp}.db"), caption="💾 Танзимоти авточавоб"
+        )
+    return True
+
+
+@router.callback_query(F.data == "adm_bk")
+async def cb_adm_backup(cb: CallbackQuery, bot: Bot) -> None:
+    if not await adm_guard(cb):
+        return
+    await cb.answer("Backup фиристода мешавад…")
+    try:
+        await send_backups(bot, cb.from_user.id)
+    except Exception as e:  # noqa: BLE001
+        log.warning("backup failed: %s", e)
+        await bot.send_message(cb.from_user.id, f"⚠️ Backup нашуд: {html.escape(str(e))}")
+
+
+@router.callback_query(F.data == "adm_rs")
+async def cb_adm_restore(cb: CallbackQuery, state: FSMContext) -> None:
+    if not await adm_guard(cb):
+        return
+    await state.set_state(AdminStates.restore)
+    text = (
+        "♻️ <b>Барқарорсозӣ</b>\n\n"
+        "Файли backup-ро (<code>bot_….db</code>) ба ин ҷо фиристед ё ҷавоб диҳед (forward кунед).\n"
+        "⚠️ Он маълумоти ҳозираро иваз мекунад.\n\n"
+        "Ду файл бошад (<code>extras_….db</code> низ) — онро ҳам фиристед."
+    )
+    await show(cb, text, kb([[btn("✅ Тамом", "adm", style="success")], [btn("↩️ Бекор", "adm", style="danger")]]))
+
+
+@router.message(AdminStates.restore, F.document)
+async def adm_restore_doc(message: Message, bot: Bot) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    doc = message.document
+    if doc.file_size and doc.file_size > 40_000_000:
+        return await message.answer("⚠️ Файл хеле калон аст.")
+    buf = io.BytesIO()
+    await bot.download(doc, destination=buf)
+    try:
+        kind, n = await admintools.restore(buf.getvalue(), extras.DB)
+        if kind == "танзимоти авточавоб":
+            await extras.init()
+    except Exception as e:  # noqa: BLE001
+        return await message.answer(f"⚠️ Барқарор нашуд: {html.escape(str(e))}")
+    await message.answer(
+        f"✅ Барқарор шуд: {kind} — {n} сабт.\nАгар файли дигар ҳаст, фиристед; вагарна «Тамом»-ро пахш кунед.",
+        reply_markup=kb([[btn("✅ Тамом", "adm", style="success")]]),
+    )
+
+
+@router.message(AdminStates.restore)
+async def adm_restore_wrong(message: Message) -> None:
+    await message.answer("📎 Файли .db-ро ҳамчун файл (document) фиристед.")
+
+
+async def auto_backup(bot: Bot) -> None:
+    """Ҳар 6 соат backup ба админҳо мефиристад (то маълумот ҳеҷ гоҳ гум нашавад)."""
+    await asyncio.sleep(300)
+    while True:
+        for admin_id in config.ADMIN_IDS:
+            try:
+                await send_backups(bot, admin_id, auto=True)
+            except Exception as e:  # noqa: BLE001
+                log.warning("auto backup failed: %s", e)
+        await asyncio.sleep(6 * 3600)
+
+
+async def startup_check(bot: Bot) -> None:
+    """Агар база хол бошад (масалан пас аз навсозӣ) — ба админ хабар медиҳад."""
+    try:
+        c = await admintools.counts()
+        if c is not None and c["total"] == 0:
+            await notify_admins(
+                bot,
+                "⚠️ Базаи маълумот ҳоло хол аст (0 корбар).\n"
+                "Агар ин пас аз навсозӣ бошад, охирин backup-ро барқарор кунед:\n"
+                "🛠 Панели Админ → ♻️ Барқарорсозӣ.",
+            )
+    except Exception as e:  # noqa: BLE001
+        log.warning("startup check failed: %s", e)
 
 
 # ====================== Админ-фармонҳо ======================
@@ -1131,6 +1508,8 @@ async def main() -> None:
 
     config.BOT_USERNAME = me.username
     log.info("Started as @%s", me.username)
+    asyncio.create_task(auto_backup(bot))
+    asyncio.create_task(startup_check(bot))
 
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
