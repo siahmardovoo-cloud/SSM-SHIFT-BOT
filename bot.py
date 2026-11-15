@@ -1,6 +1,8 @@
 import asyncio
 import html
+import json
 import logging
+import re
 import socket
 import time
 from datetime import datetime
@@ -30,6 +32,7 @@ from aiogram.types import (
 
 import config
 import db
+import extras
 import fonts
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -52,6 +55,11 @@ if not HAS_STYLE:
 
 class PayStates(StatesGroup):
     proof = State()
+
+
+class ARStates(StatesGroup):
+    text = State()
+    btn = State()
 
 
 # ====================== Ёрдамчиҳо ======================
@@ -293,31 +301,225 @@ async def cb_font_pick(cb: CallbackQuery) -> None:
 
 
 # ====================== Танзимот / Кабинет / Маълумот ======================
-@router.callback_query(F.data.in_({"settings", "toggle_auto"}))
-async def cb_settings(cb: CallbackQuery) -> None:
+def has_access(user_id: int, user) -> bool:
+    return user_id in config.ADMIN_IDS or is_active(user)
+
+
+async def locked_page(cb: CallbackQuery) -> bool:
+    """Агар обуна нест — саҳифаи қулфро нишон медиҳад ва True бармегардонад."""
     user = await db.get_user(cb.from_user.id)
-    # Танзимот танҳо барои обунахандагон (админ бе обуна ҳам мегузарад)
-    if cb.from_user.id not in config.ADMIN_IDS and not is_active(user):
-        text = (
-            "🔒 <b>Танзимот барои обунахандагон аст</b>\n\n"
-            "Аввал обуна харед — баъд табдили худкор дар Telegram Business "
-            "ва дигар имкониятҳо кушода мешаванд."
-        )
-        return await show(cb, text, kb([[btn("💳 Пардохт", "pay", style="success")], [BACK]]))
+    if has_access(cb.from_user.id, user):
+        return False
+    text = (
+        "🔒 <b>Ин бахш барои обунахандагон аст</b>\n\n"
+        "Аввал обуна харед — баъд табдили худкор дар Telegram Business, "
+        "авточавоб ва дигар имкониятҳо кушода мешаванд."
+    )
+    await show(cb, text, kb([[btn("💳 Пардохт", "pay", style="success")], [BACK]]))
+    return True
+
+
+def onoff(v) -> str:
+    return "✅" if v else "❌"
+
+
+@router.callback_query(F.data.in_({"settings", "toggle_auto", "toggle_typing"}))
+async def cb_settings(cb: CallbackQuery) -> None:
+    if await locked_page(cb):
+        return
+    uid = cb.from_user.id
     if cb.data == "toggle_auto":
-        await db.toggle_auto(cb.from_user.id)
-        user = await db.get_user(cb.from_user.id)
+        await db.toggle_auto(uid)
+    elif cb.data == "toggle_typing":
+        ex = await extras.get(uid)
+        await extras.save(uid, typing=0 if ex["typing"] else 1)
+    user = await db.get_user(uid)
+    ex = await extras.get(uid)
+    ar_state = "🟢 фаъол" if (ex["ar_on"] and ex["ar_text"]) else "🔴 хомӯш"
     text = (
         "⚙️ <b>Танзимот</b>\n\n"
         f"🔄 Табдили худкор дар Business: {'✅ фаъол' if user['auto'] else '❌ хомӯш'}\n"
+        f"⌨️ Навишти оҳиста: {'✅ фаъол' if ex['typing'] else '❌ хомӯш'}\n"
+        f"🤖 Авточавоб: {ar_state}\n"
         f"🔤 Шрифти ҳозира: <b>{fonts.font_name(user['font'])}</b>"
     )
     markup = kb([
-        [btn("🔄 Фаъол / хомӯш кардан", "toggle_auto", style="success")],
-        [btn("🔤 Шрифтҳо", "fonts", style="primary")],
+        [btn(f"🔄 Табдили худкор {onoff(user['auto'])}", "toggle_auto", style="success" if user["auto"] else "danger")],
+        [btn(f"⌨️ Навишти оҳиста {onoff(ex['typing'])}", "toggle_typing", style="success" if ex["typing"] else "danger")],
+        [btn("🤖 Авточавоб", "ar", style="primary"), btn("🔤 Шрифтҳо", "fonts", style="primary")],
         [BACK],
     ])
     await show(cb, text, markup)
+
+
+# ====================== Авточавоб ======================
+AR_HELP = (
+    "✍️ <b>Матни авточавоб</b>\n\n"
+    "Матнеро нависед, ки вақте шахси дигар ба шумо менависад, бот ба ӯ мефиристад. Масалан:\n"
+    "<code>Салом! Ман ҳоло бандам, баъдтар ҷавоб медиҳам 🤖</code>\n\n"
+    "• <code>{name}</code> — номи нависанда\n"
+    "• Эмодзиҳои premium қабул мешаванд ✨\n"
+    "• Охирашро бот худаш илова мекунад: <i>Навишташуда тавассути боти @BOTUSER</i>"
+)
+
+
+async def ar_menu(event, uid: int) -> None:
+    ex = await extras.get(uid)
+    has_text = bool(ex["ar_text"])
+    on = bool(ex["ar_on"]) and has_text
+    text = (
+        "🤖 <b>Авточавоб</b>\n\n"
+        "Вақте шахси дигар ба шумо менависад, бот ба ӯ худкор ҷавоб медиҳад.\n\n"
+        f"✍️ Матн: {'✅ гузошта шудааст' if has_text else '❌ нест'}\n"
+        f"🔘 Тугмаҳо: {len(ex['buttons'])}/{extras.MAX_BUTTONS}\n"
+        f"🔄 Режим: {'🟢 фаъол' if on else '🔴 хомӯш'}\n"
+        f"⏰ Такрор: ҳар {extras.fmt_period(ex['ar_period'])} (ба як шахс)"
+    )
+    markup = kb([
+        [btn(f"✍️ Матни авточавоб {onoff(has_text)}", "ar_text", style="primary")],
+        [btn(f"🔘 Тугмаҳои матн ({len(ex['buttons'])})", "ar_btns", style="primary")],
+        [
+            btn(f"🔄 Режим: {'🟢 Фаъол' if on else '🔴 Хомӯш'}", "ar_toggle", style="success" if on else "danger"),
+            btn(f"⏰ Такрор: {extras.fmt_period(ex['ar_period'])}", "ar_period", style="primary"),
+        ],
+        [btn("⬅️ Ба танзимот", "settings", style="danger")],
+    ])
+    await show(event, text, markup)
+
+
+@router.callback_query(F.data == "ar")
+async def cb_ar(cb: CallbackQuery, state: FSMContext) -> None:
+    if await locked_page(cb):
+        return
+    await state.clear()
+    await ar_menu(cb, cb.from_user.id)
+
+
+@router.callback_query(F.data == "ar_toggle")
+async def cb_ar_toggle(cb: CallbackQuery) -> None:
+    if await locked_page(cb):
+        return
+    ex = await extras.get(cb.from_user.id)
+    if not ex["ar_text"]:
+        return await cb.answer("Аввал матни авточавобро гузоред", show_alert=True)
+    await extras.save(cb.from_user.id, ar_on=0 if ex["ar_on"] else 1)
+    await ar_menu(cb, cb.from_user.id)
+
+
+@router.callback_query(F.data == "ar_period")
+async def cb_ar_period(cb: CallbackQuery) -> None:
+    if await locked_page(cb):
+        return
+    ex = await extras.get(cb.from_user.id)
+    cur = ex["ar_period"]
+    nxt = next((p for p in extras.PERIODS if p > cur), extras.PERIODS[0])
+    await extras.save(cb.from_user.id, ar_period=nxt)
+    await ar_menu(cb, cb.from_user.id)
+
+
+@router.callback_query(F.data == "ar_text")
+async def cb_ar_text(cb: CallbackQuery, state: FSMContext) -> None:
+    if await locked_page(cb):
+        return
+    await state.set_state(ARStates.text)
+    text = AR_HELP.replace("@BOTUSER", f"@{config.BOT_USERNAME}")
+    await show(cb, text, kb([
+        [btn("🗑 Хомӯш кардан", "ar_clear", style="danger")],
+        [btn("↩️ Бекор", "ar", style="primary")],
+    ]))
+
+
+@router.callback_query(F.data == "ar_clear")
+async def cb_ar_clear(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await extras.save(cb.from_user.id, ar_text="", ar_on=0)
+    await ar_menu(cb, cb.from_user.id)
+
+
+@router.message(ARStates.text, F.text)
+async def ar_save_text(message: Message, state: FSMContext) -> None:
+    if message.text.startswith("/"):
+        return await message.answer("✍️ Матни оддӣ нависед (на фармон) ё «↩️ Бекор»-ро пахш кунед.")
+    if len(message.text) > 700:
+        return await message.answer("⚠️ Матн аз 700 ҳарф зиёд аст. Кӯтоҳтар нависед.")
+    await extras.save(message.from_user.id, ar_text=message.html_text, ar_on=1)
+    await state.clear()
+    await message.answer("✅ Матни авточавоб захира шуд ва фаъол гардид.")
+    await ar_menu(message, message.from_user.id)
+
+
+@router.message(ARStates.text)
+async def ar_text_wrong(message: Message) -> None:
+    await message.answer("✍️ Лутфан матн нависед.")
+
+
+async def ar_btns_menu(event, uid: int) -> None:
+    ex = await extras.get(uid)
+    lines = [f"🔘 <b>Тугмаҳои матн</b> ({len(ex['buttons'])}/{extras.MAX_BUTTONS})\n"]
+    lines.append("Ин тугмаҳо дар зери паёми авточавоб пайдо мешаванд.\n")
+    for i, (label, url) in enumerate(ex["buttons"], 1):
+        lines.append(f"{i}. {html.escape(label)} → {html.escape(url)}")
+    rows = [[btn(f"🗑 {label}", f"ar_bdel:{i}", style="danger")] for i, (label, _) in enumerate(ex["buttons"])]
+    if len(ex["buttons"]) < extras.MAX_BUTTONS:
+        rows.append([btn("➕ Тугма илова кардан", "ar_badd", style="success")])
+    rows.append([btn("⬅️ Баргаштан", "ar", style="danger")])
+    await show(event, "\n".join(lines), kb(rows))
+
+
+@router.callback_query(F.data == "ar_btns")
+async def cb_ar_btns(cb: CallbackQuery, state: FSMContext) -> None:
+    if await locked_page(cb):
+        return
+    await state.clear()
+    await ar_btns_menu(cb, cb.from_user.id)
+
+
+@router.callback_query(F.data == "ar_badd")
+async def cb_ar_badd(cb: CallbackQuery, state: FSMContext) -> None:
+    if await locked_page(cb):
+        return
+    await state.set_state(ARStates.btn)
+    text = (
+        "➕ <b>Тугмаи нав</b>\n\n"
+        "Ном ва линкро бо хати «|» ҷудо карда нависед:\n"
+        "<code>Канал | https://t.me/username</code>"
+    )
+    await show(cb, text, kb([[btn("↩️ Бекор", "ar_btns", style="primary")]]))
+
+
+@router.message(ARStates.btn, F.text)
+async def ar_save_btn(message: Message, state: FSMContext) -> None:
+    parsed = extras.parse_button(message.text)
+    if not parsed:
+        return await message.answer(
+            "⚠️ Дуруст нест. Ин тавр нависед:\n<code>Канал | https://t.me/username</code>"
+        )
+    ex = await extras.get(message.from_user.id)
+    if len(ex["buttons"]) >= extras.MAX_BUTTONS:
+        await state.clear()
+        return await message.answer("⚠️ Аллакай 6 тугма ҳаст.")
+    await extras.save(message.from_user.id, buttons=ex["buttons"] + [parsed])
+    await state.clear()
+    await message.answer("✅ Тугма илова шуд.")
+    await ar_btns_menu(message, message.from_user.id)
+
+
+@router.message(ARStates.btn)
+async def ar_btn_wrong(message: Message) -> None:
+    await message.answer("➕ Матн нависед: <code>Ном | линк</code>")
+
+
+@router.callback_query(F.data.startswith("ar_bdel:"))
+async def cb_ar_bdel(cb: CallbackQuery) -> None:
+    if await locked_page(cb):
+        return
+    idx = int(cb.data.split(":")[1])
+    ex = await extras.get(cb.from_user.id)
+    btns = ex["buttons"]
+    if 0 <= idx < len(btns):
+        btns.pop(idx)
+        await extras.save(cb.from_user.id, buttons=btns)
+    await ar_btns_menu(cb, cb.from_user.id)
 
 
 @router.callback_query(F.data == "cabinet")
@@ -350,6 +552,8 @@ async def cb_info(cb: CallbackQuery) -> None:
         "• Режими inline: дар ҳар чат <code>@{bot} матн</code> нависед ва шрифтро интихоб кунед.\n"
         "• Telegram Business: паёмҳои шумо дар чатҳо худкор бо шрифти интихобшуда иваз мешаванд "
         "(бо обуна).\n"
+        "• Авточавоб: ба касе, ки ба шумо менависад, бот худкор ҷавоб медиҳад.\n"
+        "• Фармонҳо дар чат: /shrift1…/shrift15 — шрифт, /shrift0 — хомӯш, /hask — шӯхӣ.\n"
         "• Системаи реферал: {t} дӯст = 1 моҳи ройгон."
     ).format(bot=config.BOT_USERNAME, t=config.REF_TARGET)
     await show(cb, text, kb([[BACK]]))
@@ -365,6 +569,7 @@ async def cb_connect(cb: CallbackQuery) -> None:
         "4. Иҷозатҳо: <b>Паёмҳоро хондан</b> ва <b>Ба паёмҳо ҷавоб додан</b> / "
         "<b>Таҳрир</b> фаъол бошанд.\n"
         "5. Обунаро фаъол кунед (💳 Пардохт) — ва паёмҳо худкор иваз мешаванд ✅\n\n"
+        "💡 Дар ҳар чат: <code>/shrift5</code> — шрифти 5, <code>/shrift0</code> — хомӯш, <code>/hask</code> — шӯхӣ.\n\n"
         "ℹ️ Паёмҳои дорои линк, @ва кодро бот дастнорас мегузорад."
     )
     await show(cb, text, kb([[btn("💳 Пардохт", "pay", style="success")], [BACK]]))
@@ -537,14 +742,64 @@ async def cmd_grant(message: Message, command: CommandObject, bot: Bot) -> None:
 async def on_business_connection(connection: BusinessConnection, bot: Bot) -> None:
     await db.save_connection(connection.id, connection.user.id, connection.is_enabled)
     text = (
-        "✅ Бот ба Telegram Business пайваст шуд!"
+        f"🔌 Бот ба аккаунти шумо пайваст шуд! (@{config.BOT_USERNAME})\n"
+        "/shrift1 … /shrift15 — шрифтро иваз кардан, /shrift0 — хомӯш кардан\n"
+        "/hask — шӯхӣ"
         if connection.is_enabled
         else "ℹ️ Бот аз Telegram Business ҷудо шуд."
     )
     try:
-        await bot.send_message(connection.user_chat_id, text)
+        await bot.send_message(connection.user_chat_id, text, parse_mode=None)
     except Exception as e:  # noqa: BLE001
         log.warning("business notify failed: %s", e)
+
+
+async def biz_edit(bot: Bot, message: Message, conn_id: str, text: str) -> bool:
+    try:
+        await bot.edit_message_text(
+            text=text,
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+            business_connection_id=conn_id,
+            parse_mode=None,
+        )
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.warning("business edit failed: %s", e)
+        return False
+
+
+async def maybe_autoreply(bot: Bot, message: Message, owner_id: int, conn_id: str) -> None:
+    """Вақте шахси дигар ба соҳиби аккаунт менависад — ҷавоби худкор."""
+    sender = message.from_user
+    if not sender or sender.is_bot:
+        return
+    ex = await extras.get(owner_id)
+    if not ex["ar_on"] or not ex["ar_text"]:
+        return
+    user = await db.get_user(owner_id)
+    if not user or not has_access(owner_id, user):
+        return
+    if not await extras.claim_reply(owner_id, message.chat.id, ex["ar_period"]):
+        return
+    name = sender.first_name or sender.full_name or ""
+    markup = kb([[btn(label, url=url, style="primary")] for label, url in ex["buttons"]]) if ex["buttons"] else None
+    text = extras.render_autoreply(ex["ar_text"], name, config.BOT_USERNAME)
+    try:
+        await bot.send_message(
+            chat_id=message.chat.id, text=text, business_connection_id=conn_id, reply_markup=markup
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("autoreply failed, retry plain: %s", e)
+        try:  # масалан эмодзии premium иҷозат набошад
+            await bot.send_message(
+                chat_id=message.chat.id,
+                text=extras.strip_tags(text),
+                business_connection_id=conn_id,
+                reply_markup=markup,
+            )
+        except Exception as e2:  # noqa: BLE001
+            log.warning("autoreply plain failed: %s", e2)
 
 
 @router.business_message(F.text)
@@ -562,16 +817,46 @@ async def on_business_message(message: Message, bot: Bot) -> None:
     else:
         owner_id = conn["user_id"]
 
-    # Танҳо паёмҳои худи соҳиби аккаунт иваз мешаванд
-    if not message.from_user or message.from_user.id != owner_id:
+    if not message.from_user:
         return
 
+    # Паёми шахси дигар -> авточавоб
+    if message.from_user.id != owner_id:
+        await maybe_autoreply(bot, message, owner_id, conn_id)
+        return
+
+    # Аз ин ҷо: паёми худи соҳиби аккаунт
     user = await db.get_user(owner_id)
-    if not user or not user["font"] or not user["auto"] or not is_active(user):
+    if not user or not has_access(owner_id, user):
         return
 
     text = message.text
+    low = text.strip().lower()
+
+    # /shrift1 … /shrift15, /shrift0
+    m = re.fullmatch(r"/shrift\s*(\d{1,2})", low)
+    if m:
+        fid = int(m.group(1))
+        if fid != 0 and fid not in {f[0] for f in fonts.FONTS}:
+            await biz_edit(bot, message, conn_id, f"⚠️ Чунин шрифт нест. Аз 1 то {len(fonts.FONTS)} интихоб кунед.")
+            return
+        await db.set_font(owner_id, fid)
+        label = "хомӯш шуд" if fid == 0 else fonts.font_name(fid)
+        await biz_edit(bot, message, conn_id, f"✅ Шрифт: {label}")
+        return
+
+    # /hask — шӯхии бе зарар
+    if low == "/hask":
+        frames = extras.hask_frames(config.BOT_USERNAME)
+        for i, fr in enumerate(frames):
+            await biz_edit(bot, message, conn_id, fr)
+            if i < len(frames) - 1:
+                await asyncio.sleep(1.4)
+        return
+
     if text.startswith("/"):
+        return
+    if not user["font"] or not user["auto"]:
         return
     if any(e.type in SKIP_ENTITIES for e in (message.entities or [])):
         return
@@ -579,16 +864,15 @@ async def on_business_message(message: Message, bot: Bot) -> None:
     new_text = fonts.apply_font(user["font"], text)
     if new_text == text:
         return
-    try:
-        await bot.edit_message_text(
-            text=new_text,
-            chat_id=message.chat.id,
-            message_id=message.message_id,
-            business_connection_id=conn_id,
-            parse_mode=None,
-        )
-    except TelegramBadRequest as e:
-        log.warning("business edit failed: %s", e)
+
+    # Навишти оҳиста: матн ҳарф ба ҳарф пайдо мешавад
+    ex = await extras.get(owner_id)
+    if ex["typing"]:
+        for fr in extras.typing_frames(new_text):
+            if not await biz_edit(bot, message, conn_id, fr):
+                break
+            await asyncio.sleep(0.45)
+    await biz_edit(bot, message, conn_id, new_text)
 
 
 # ====================== Inline-режим ======================
@@ -642,6 +926,7 @@ def make_session() -> AiohttpSession:
 
 async def main() -> None:
     await db.init()
+    await extras.init()
     bot = Bot(
         token=config.BOT_TOKEN,
         session=make_session(),
