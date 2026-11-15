@@ -34,31 +34,34 @@ from aiogram.types import (
 )
 
 import admintools
-import botlang
 import config
 import db
 import extras
 import fonts
+import botlang
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("fontbot")
 
 router = Router()
 
+# Entity-ҳое, ки бо иваз кардани шрифт вайрон мешаванд — чунин паёмҳоро дастнорас мегузорем
 SKIP_ENTITIES = {
     "url", "text_link", "mention", "text_mention", "email", "phone_number",
     "bot_command", "custom_emoji", "code", "pre",
 }
 
+# Оё версияи aiogram рангҳои тугмаро (style) дастгирӣ мекунад?
+# Агар не — тугмаҳо бе ранг кор мекунанд, бот намеафтад.
 HAS_STYLE = "style" in InlineKeyboardButton.model_fields
 if not HAS_STYLE:
     log.warning("aiogram кӯҳна аст: рангҳои тугма хомӯшанд. Барои ранг: pip install -U aiogram")
 
-# ----- Т-Банк -----
+# ----- Т-Банк (агар дар config.py нест — қиматҳои зерин истифода мешаванд) -----
 TBANK_NAME = getattr(config, "TBANK_NAME", "Т-Банк")
 TBANK_NUMBER = getattr(config, "TBANK_NUMBER", "9990000698")
 TBANK_HOLDER = getattr(config, "TBANK_HOLDER", "Саъдулло С.")
-TBANK_PRICE_RUB = getattr(config, "TBANK_PRICE_RUB", None)
+TBANK_PRICE_RUB = getattr(config, "TBANK_PRICE_RUB", 50)  # масалан 300; агар None — бо сомонӣ менависад
 
 
 class PayStates(StatesGroup):
@@ -78,6 +81,7 @@ def btn(
     url: str | None = None,
     style: str | None = None,
 ) -> InlineKeyboardButton:
+    """style: 'primary' (кабуд), 'success' (сабз), 'danger' (сурх)."""
     extra = {"style": style} if (style and HAS_STYLE) else {}
     if url:
         return InlineKeyboardButton(text=text, url=url, **extra)
@@ -125,6 +129,7 @@ def menu_kb(uid: int | None = None) -> InlineKeyboardMarkup:
 
 
 async def show(event: Message | CallbackQuery, text: str, markup: InlineKeyboardMarkup) -> None:
+    """Паёми мавҷударо иваз мекунад (барои callback) ё паёми нав мефиристад."""
     uid = event.from_user.id if event.from_user else None
     markup = botlang.localize(markup, uid)
     if isinstance(event, CallbackQuery):
@@ -159,7 +164,7 @@ async def missing_sponsors(bot: Bot, user_id: int) -> list[str]:
             member = await bot.get_chat_member(ch, user_id)
             if member.status in ("left", "kicked"):
                 missing.append(ch)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001  (бот дар канал админ нест ва ғ.)
             log.warning("sponsor check %s failed: %s", ch, e)
     return missing
 
@@ -338,7 +343,7 @@ def fonts_kb(current: int) -> InlineKeyboardMarkup:
         if chunk:
             rows.append(chunk)
         i += size
-    if i < len(buttons):
+    if i < len(buttons):  # агар шрифти иловагӣ илова шавад
         for j in range(i, len(buttons), 4):
             rows.append(buttons[j:j + 4])
     rows.append([btn("🚫 Хомӯш кардан", "font:0", style="danger")])
@@ -367,6 +372,7 @@ def has_access(user_id: int, user) -> bool:
 
 
 async def locked_page(cb: CallbackQuery) -> bool:
+    """Агар обуна нест — саҳифаи қулфро нишон медиҳад ва True бармегардонад."""
     user = await db.get_user(cb.from_user.id)
     if has_access(cb.from_user.id, user):
         return False
@@ -1318,7 +1324,7 @@ async def cb_adm_csv(cb: CallbackQuery, bot: Bot) -> None:
 async def send_backups(bot: Bot, chat_id: int, auto: bool = False) -> bool:
     c = await admintools.counts()
     if auto and (not c or c["total"] == 0):
-        return False
+        return False  # базаи холиро ҳамчун backup намефиристем
     stamp = datetime.now().strftime("%Y%m%d_%H%M")
     cap = (
         f"💾 Backup — {stamp}\n👥 {c['total']} корбар, ✅ {c['active']} обуна"
@@ -1387,7 +1393,7 @@ async def adm_restore_wrong(message: Message) -> None:
 
 
 async def auto_backup(bot: Bot) -> None:
-    """Ҳар 6 соат backup ба админҳо мефиристад."""
+    """Ҳар 6 соат backup ба админҳо мефиристад (то маълумот ҳеҷ гоҳ гум нашавад)."""
     await asyncio.sleep(300)
     while True:
         for admin_id in config.ADMIN_IDS:
@@ -1399,6 +1405,7 @@ async def auto_backup(bot: Bot) -> None:
 
 
 async def startup_check(bot: Bot) -> None:
+    """Агар база хол бошад (масалан пас аз навсозӣ) — ба админ хабар медиҳад."""
     try:
         c = await admintools.counts()
         if c is not None and c["total"] == 0:
@@ -1530,7 +1537,7 @@ async def handle_incoming(bot: Bot, message: Message, owner_id: int, conn_id: st
         )
     except Exception as e:  # noqa: BLE001
         log.warning("autoreply failed, retry plain: %s", e)
-        try:
+        try:  # масалан эмодзии premium иҷозат набошад
             await bot.send_message(
                 chat_id=message.chat.id,
                 text=extras.strip_tags(text),
@@ -1548,10 +1555,12 @@ async def on_business_message(message: Message, bot: Bot) -> None:
     if owner_id is None or not message.from_user:
         return
 
+    # Паёми шахси дигар -> кэш + авточавоб
     if message.from_user.id != owner_id:
         await handle_incoming(bot, message, owner_id, conn_id)
         return
 
+    # Аз ин ҷо: паёми худи соҳиби аккаунт
     user = await db.get_user(owner_id)
     if not user or not has_access(owner_id, user):
         return
@@ -1559,6 +1568,7 @@ async def on_business_message(message: Message, bot: Bot) -> None:
     text = message.text
     low = text.strip().lower()
 
+    # /shrift1 … /shrift15, /shrift0
     m = re.fullmatch(r"/shrift\s*(\d{1,2})", low)
     if m:
         fid = int(m.group(1))
@@ -1574,9 +1584,10 @@ async def on_business_message(message: Message, bot: Bot) -> None:
             return
         await db.set_font(owner_id, fid)
         label = botlang.pick(owner_id, "хомӯш шуд", "выключен") if fid == 0 else fonts.font_name(fid)
-        await biz_edit(bot, message, conn_id, f"✅ Шрифт: {label}")
+        await biz_edit(bot, message, conn_id, botlang.pick(owner_id, f"✅ Шрифт: {label}", f"✅ Шрифт: {label}"))
         return
 
+    # /hask — шӯхии бе зарар
     if low == "/hask":
         frames = extras.hask_frames(config.BOT_USERNAME)
         for i, fr in enumerate(frames):
@@ -1596,6 +1607,7 @@ async def on_business_message(message: Message, bot: Bot) -> None:
     if new_text == text:
         return
 
+    # Навишти оҳиста: матн ҳарф ба ҳарф пайдо мешавад
     ex = await extras.get(owner_id)
     if ex["typing"]:
         for fr in extras.typing_frames(new_text):
@@ -1610,6 +1622,7 @@ def _short(s: str, n: int = 900) -> str:
     return html.escape(s if len(s) <= n else s[:n] + "…")
 
 
+# Удалит: паёми нестшуда (бо ҳифзи эҳтиёт, агар aiogram кӯҳна бошад, бот намеафтад)
 if hasattr(router, "deleted_business_messages"):
 
     @router.deleted_business_messages()
@@ -1637,6 +1650,7 @@ if hasattr(router, "deleted_business_messages"):
                 log.warning("deleted notify failed: %s", e)
 
 
+# Таҳрир: паёми таҳриршуда
 if hasattr(router, "edited_business_message"):
 
     @router.edited_business_message(F.text)
@@ -1705,6 +1719,7 @@ GROUP_CMD = re.compile(r"^/(?:f|shrift)(?:@\w+)?\s+(.+)$", re.I | re.S)
 
 @router.message(F.text, F.chat.type.in_({"group", "supergroup"}))
 async def group_font(message: Message) -> None:
+    """Дар гурӯҳ: /f матн — бот матнро бо шрифти шумо мефиристад."""
     m = GROUP_CMD.match(message.text.strip())
     if not m or not message.from_user:
         return
@@ -1727,7 +1742,7 @@ async def group_font(message: Message) -> None:
         )
     styled = fonts.apply_font(user["font"], m.group(1))
     await message.answer(f"👤 {message.from_user.full_name}:\n{styled}", parse_mode=None)
-    try:
+    try:  # агар бот иҷозати нест кардан дошта бошад, фармони аслиро нест мекунад
         await message.delete()
     except Exception:  # noqa: BLE001
         pass
@@ -1752,6 +1767,7 @@ async def convert_private(message: Message) -> None:
 
 # ====================== Оғоз ======================
 def make_session() -> AiohttpSession:
+    """Сессия бо IPv4 ва пайвастагии нав барои ҳар дархост (ҳал барои Request timeout дар Railway)."""
     session = AiohttpSession(timeout=60)
     try:
         session._connector_init["family"] = socket.AF_INET
@@ -1771,6 +1787,7 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
+    # Агар Telegram дар оғоз ҷавоб надиҳад, бот намеафтад, балки такрор мекунад
     while True:
         try:
             me = await bot.get_me()
