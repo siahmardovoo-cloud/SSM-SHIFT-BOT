@@ -15,11 +15,18 @@ import config
 
 
 def _db_path() -> str:
-    for name in ("DB_PATH", "DB_FILE", "DATABASE", "DB_NAME", "DB"):
-        v = getattr(config, name, None)
-        if v and isinstance(v, (str, os.PathLike)):
-            d = os.path.dirname(str(v))
-            return os.path.join(d, "extras.db") if d else "extras.db"
+    try:
+        import db as _db  # файли базаи асосӣ ҳар ҷое бошад, extras.db ҳамон ҷо мешавад
+    except Exception:  # noqa: BLE001
+        _db = None
+    for mod in (_db, config):
+        if mod is None:
+            continue
+        for name in ("DB_PATH", "DB_FILE", "DATABASE", "DB_NAME", "DB"):
+            v = getattr(mod, name, None)
+            if v and isinstance(v, (str, os.PathLike)):
+                d = os.path.dirname(str(v))
+                return os.path.join(d, "extras.db") if d else "extras.db"
     return "extras.db"
 
 
