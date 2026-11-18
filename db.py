@@ -63,8 +63,8 @@ async def ensure_user(uid: int, name: str, username: str | None, referrer: int |
     row = await fetchone("SELECT id FROM users WHERE id=?", (uid,))
     if row is None:
         await execute(
-            "INSERT INTO users (id, name, username, referrer_id, created_at) VALUES (?,?,?,?,?)",
-            (uid, name, username, referrer, int(time.time())),
+            "INSERT INTO users (id, name, username, referrer_id, created_at, sub_until) VALUES (?,?,?,?,?,?)",
+            (uid, name, username, referrer, int(time.time()), int(time.time()) + config.TRIAL_DAYS * 86400),
         )
     else:
         await execute("UPDATE users SET name=?, username=? WHERE id=?", (name, username, uid))
