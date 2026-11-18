@@ -47,10 +47,8 @@ SANS_BOLD_ITALIC = _build(0x1D63C, 0x1D656, 0x1D7EC)
 _SC_SRC = "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀꜱᴛᴜᴠᴡxʏᴢ"
 assert len(_SC_SRC) == 26
 SMALL_CAPS = dict(zip(LOW, _SC_SRC))
-# Шрифти 1 (Stylish): а -> ɑ, л -> ʌ, е -> є, и -> і, рақамҳо ғафс (bold)
-_STYLISH_LOWER = {"а": "ɑ", "л": "ʌ", "е": "є", "э": "є", "и": "і"}
-STYLISH = dict(_STYLISH_LOWER)
-STYLISH.update({k.upper(): v.upper() for k, v in _STYLISH_LOWER.items()})
+# Шрифти 1 (Stylish) мисли скриншоти бот: а -> α, л -> ʌ, м -> ⲙ, рақамҳо ғафс (bold)
+STYLISH = {"а": "α", "л": "ʌ", "м": "ⲙ"}
 for _i, _d in enumerate(DIG):
     STYLISH[_d] = chr(0x1D7CE + _i)
 
