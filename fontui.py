@@ -1,7 +1,7 @@
 """Интихоби шрифт бо саҳифаҳо (барои 65 шрифт) ва inline-режим."""
 import html
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
     CallbackQuery,
@@ -19,6 +19,32 @@ import fonts
 
 PAGE_SIZE = 15
 INLINE_PAGE = 50  # Telegram дар як ҷавоб на бештар аз 50 натиҷа қабул мекунад
+
+
+# ====================== Рангҳои тугмаҳо ======================
+def auto_style(text: str, data: str | None, url: str | None) -> str:
+    """primary = кабуд, success = сабз, danger = сурх."""
+    t = text or ""
+    d = data or ""
+    if d == "menu" or t.startswith(("⬅️", "🚫", "❌", "🎓")):
+        return "danger"
+    if d in {"pay", "ref", "connect", "pay_card", "check_sub"} or t.startswith(("✅", "📞", "📤", "💳")):
+        return "success"
+    return "primary"
+
+
+async def _color_middleware(make_request, bot, method):
+    """Пеш аз фиристодани ҳар паём ба тугмаҳо ранг мегузорад."""
+    try:
+        markup = getattr(method, "reply_markup", None)
+        if isinstance(markup, InlineKeyboardMarkup):
+            for row in markup.inline_keyboard:
+                for b in row:
+                    if getattr(b, "style", None) is None:
+                        b.style = auto_style(b.text, b.callback_data, b.url)
+    except Exception:  # noqa: BLE001  (агар версия ранг надорад, хато намешавад)
+        pass
+    return await make_request(bot, method)
 
 
 def pages_count() -> int:
@@ -70,6 +96,10 @@ async def _show(cb: CallbackQuery, text: str, markup: InlineKeyboardMarkup) -> N
 
 
 def register(router: Router) -> None:
+    @router.startup()
+    async def _on_startup(bot: Bot) -> None:
+        bot.session.middleware(_color_middleware)
+
     @router.callback_query(F.data.regexp(r"^fonts(:p:\d+)?$"))
     async def cb_fonts(cb: CallbackQuery) -> None:
         page = int(cb.data.split(":")[2]) if ":p:" in cb.data else 0
