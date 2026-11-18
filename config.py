@@ -33,6 +33,7 @@ SPONSOR_CHANNELS = _strs(os.getenv("SPONSOR_CHANNELS", ""))
 PRICE_SOMONI = int(os.getenv("PRICE_SOMONI", "5"))
 STARS_PRICE = int(os.getenv("STARS_PRICE", "40"))
 SUB_DAYS = int(os.getenv("SUB_DAYS", "30"))
+TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "3"))  # рӯзи ройгон барои корбари нав
 
 # Пардохт бо корт
 CARD_BANK = os.getenv("CARD_BANK", "Душанбе Сити")
